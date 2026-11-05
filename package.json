@@ -1,0 +1,25 @@
+{
+  "name": "shuati-helper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "本地图片转题库刷题助手",
+  "scripts": {
+    "test": "node --test tests/parser.test.js tests/store.test.js",
+    "test:ai": "py -m unittest discover -s tests -p \"test_*.py\"",
+    "test:ui": "node tests/ui-smoke.mjs",
+    "test:ui:ai": "node tests/ui-ai.mjs",
+    "test:ui:ai-retry": "node tests/ui-ai-retry.mjs",
+    "test:ui:assistant": "node tests/ui-assistant.mjs",
+    "test:ui:subjects": "node tests/ui-subjects.mjs",
+    "test:ui:feedback": "node tests/ui-feedback.mjs",
+    "test:ui:short": "node tests/ui-short.mjs",
+    "test:ui:taxonomy": "node tests/ui-taxonomy.mjs",
+    "test:ui:bank-reorder": "node tests/ui-bank-reorder.mjs",
+    "test:ui:bulk-actions": "node tests/ui-bulk-actions.mjs",
+    "test:ui:insights": "node tests/ui-insights.mjs",
+    "test:ui:duplicates": "node tests/ui-duplicates.mjs",
+    "test:ui:duplicate-ignore": "node tests/ui-duplicate-ignore.mjs",
+    "test:ui:infinite": "node tests/ui-infinite.mjs"
+  }
+}
