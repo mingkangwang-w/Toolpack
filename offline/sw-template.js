@@ -34,7 +34,7 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
 
   if (request.mode === 'navigate') {
-    // 安装后直接使用本地缓存，不等待 GitHub Pages；断网或站点不可达时也能立即打开。
+    // 安装后直接使用本地缓存，不等待远程站点；断网或站点不可达时也能立即打开。
     event.respondWith(
       caches.match('./index.html').then((cached) => {
         if (cached) return cached;

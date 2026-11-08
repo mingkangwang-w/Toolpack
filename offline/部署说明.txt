@@ -31,7 +31,7 @@
 
 二、方式 B：部署到 HTTPS 静态站点
 1. 把本文件夹中的全部文件上传到一个 HTTPS 静态站点。
-   可以是 GitHub Pages、Cloudflare Pages、自己的 HTTPS 服务器或 NAS。
+   可以是 Cloudflare Pages、自己的 HTTPS 服务器或 NAS。
    不需要后端和数据库，也不会把题库上传到服务器。
 2. 平板用浏览器打开该 HTTPS 地址，等页面完整加载一次。
 3. 按上面的方式添加到主屏幕 / 安装应用。

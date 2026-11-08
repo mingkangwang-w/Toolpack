@@ -151,9 +151,7 @@ py -m http.server 8770 --directory dist-offline
 # 打开 http://127.0.0.1:8770/
 ```
 
-Service Worker 只在 `localhost` 或 HTTPS 下生效。部署到平板时，需要把 `dist-offline/` 中的全部文件放到 HTTPS 静态站点（例如 GitHub Pages、Cloudflare Pages 或自己的 HTTPS 服务器），然后在平板浏览器中打开并选择「添加到主屏幕」/「安装应用」。首次安装需要联网，安装完成后可以完全断网刷题。
-
-仓库包含 GitHub Pages 工作流 `.github/workflows/pages.yml`。推送到 `main` 后，工作流会自动构建 `dist-offline/` 并发布。若首次发布没有自动开启 Pages，请到仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**，再重新运行工作流。发布地址通常是 `https://<用户名>.github.io/<仓库名>/`。
+Service Worker 只在 `localhost` 或 HTTPS 下生效。如果要把 `dist-offline/` 部署到公网，可以使用任意 HTTPS 静态站点（例如 Cloudflare Pages、自己的 HTTPS 服务器或 NAS），然后在平板浏览器中打开并选择「添加到主屏幕」/「安装应用」。首次安装需要联网，安装完成后可以完全断网刷题。
 
 #### 不使用外网：局域网安装（HTTP 安装页 + HTTPS 应用，iPad / Android）
 
