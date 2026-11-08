@@ -1,9 +1,16 @@
+import { parseMarkdownBanks } from '../api.js';
+import { OFFLINE_MODE } from '../runtime.js';
 import {
   answerDisplay,
   answerIssueReason,
+  canonicalBankKey,
+  canonicalFolderKey,
+  exportLibraryPackage,
   filterQuestionsByBank,
   getLibraryIssues,
   getStats,
+  importBackup,
+  localDateKey,
   isMastered,
   isQuestionAnswerable,
   questionDuplicateKey,
@@ -11,6 +18,7 @@ import {
 } from '../store.js';
 import {
   confirmAction,
+  downloadJSON,
   escapeHTML,
   icon,
   openDialog,
@@ -18,6 +26,70 @@ import {
   toast,
   typeClass,
 } from '../ui.js';
+
+function importUid(prefix) {
+  return `${prefix}_${
+    globalThis.crypto?.randomUUID?.() ||
+    `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+  }`;
+}
+
+function parsedBanksToPayload(banks) {
+  const now = new Date().toISOString();
+  const subjectsByKey = new Map();
+  const banksByKey = new Map();
+  const questions = [];
+
+  for (const parsed of banks || []) {
+    const subjectName = String(parsed?.subjectName || '导入题库').trim() || '导入题库';
+    const subjectKey = canonicalFolderKey(subjectName);
+    let subject = subjectsByKey.get(subjectKey);
+    if (!subject) {
+      subject = {
+        id: importUid('subject'),
+        name: subjectName,
+        createdAt: now,
+        updatedAt: now,
+      };
+      subjectsByKey.set(subjectKey, subject);
+    }
+
+    const bankName = String(parsed?.bankName || '导入题库').trim() || '导入题库';
+    const bankKey = `${subjectKey}::${canonicalBankKey(bankName)}`;
+    let bank = banksByKey.get(bankKey);
+    if (!bank) {
+      bank = {
+        id: importUid('bank'),
+        subjectId: subject.id,
+        name: bankName,
+        createdAt: now,
+        updatedAt: now,
+      };
+      banksByKey.set(bankKey, bank);
+    }
+
+    for (const raw of Array.isArray(parsed?.questions) ? parsed.questions : []) {
+      if (!raw || !String(raw.stem || '').trim()) continue;
+      questions.push({
+        ...raw,
+        id: importUid('q'),
+        subjectId: subject.id,
+        bankId: bank.id,
+      });
+    }
+  }
+
+  return {
+    app: '刷题助手',
+    version: 2,
+    exportedAt: now,
+    subjects: [...subjectsByKey.values()],
+    banks: [...banksByKey.values()],
+    questions,
+    history: [],
+    duplicateIgnores: [],
+  };
+}
 
 const FILTERS = [
   { key: 'all', label: '全部' },
@@ -666,6 +738,13 @@ export function createLibraryView(app) {
           </div>
           <div class="header-actions">
             <button type="button" class="btn ghost" data-action="ai-inspect">${icon('sparkles', 16)} AI 巡检</button>
+            ${
+              OFFLINE_MODE
+                ? `<button type="button" class="btn ghost" data-action="offline-guide">${icon('list', 16)} 配置向导</button>`
+                : `<button type="button" class="btn ghost" data-action="share-library">${icon('tablet', 16)} 分享给平板</button>`
+            }
+            <button type="button" class="btn ghost" data-action="import-library">${icon('database', 16)} 导入题库</button>
+            <button type="button" class="btn ghost" data-action="export-library">${icon('download', 16)} 导出题库</button>
             <button type="button" class="btn ghost" data-action="manual">${icon('edit', 16)} 手动录入</button>
             <button type="button" class="btn subtle" data-action="import">${icon('image', 16)} 导入图片</button>
             <button type="button" class="btn primary" data-action="new-subject">${icon('plus', 17)} 新建科目</button>
@@ -779,6 +858,366 @@ export function createLibraryView(app) {
     root.querySelectorAll('.bank-row.is-dragging, .bank-row.is-drop-before, .bank-row.is-drop-after').forEach(
       (row) => row.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after'),
     );
+  }
+
+  function exportLibraryDialog() {
+    const groups = app.state.subjects
+      .map((subject) => {
+        const banks = app.banksForSubject(subject.id).map((bank) => ({
+          bank,
+          count: app.state.questions.filter((question) => question.bankId === bank.id).length,
+        }));
+        return {
+          subject,
+          banks,
+          questionCount: banks.reduce((sum, item) => sum + item.count, 0),
+        };
+      })
+      .filter((group) => group.banks.length);
+
+    if (!groups.length) {
+      toast('还没有可以导出的子题库。', 'info');
+      return;
+    }
+    if (!groups.some((group) => group.questionCount > 0)) {
+      toast('题库中还没有题目，暂时无法导出。', 'info');
+      return;
+    }
+
+    openDialog({
+      title: '导出题库',
+      eyebrow: 'EXPORT LIBRARY',
+      description: '选择要包含的科目或子题库，全部内容会合并导出为一个 JSON 文件。',
+      size: 'md',
+      content: `
+        <div class="library-export">
+          <div class="library-export-head">
+            <div>
+              <h3>选择要导出的题库</h3>
+              <p>导出后可在「导入题库」中选择这个文件，合并到当前题库。</p>
+            </div>
+            <div class="library-export-bulk">
+              <button type="button" class="btn ghost" data-export-all>全选</button>
+              <button type="button" class="btn ghost" data-export-none>清空</button>
+            </div>
+          </div>
+          <div class="library-export-list">
+            ${groups
+              .map(
+                ({ subject, banks, questionCount }) => `
+                  <section class="library-export-group">
+                    <label class="library-export-subject">
+                      <input type="checkbox" data-export-subject="${escapeHTML(subject.id)}" checked>
+                      <span>
+                        <b>${escapeHTML(subject.name)}</b>
+                        <small>${banks.length} 个子题库 · ${questionCount} 道题</small>
+                      </span>
+                    </label>
+                    <div class="library-export-banks">
+                      ${banks
+                        .map(
+                          ({ bank, count }) => `
+                            <label class="library-export-bank">
+                              <input type="checkbox" data-export-bank="${escapeHTML(bank.id)}"
+                                data-subject-id="${escapeHTML(subject.id)}" data-question-count="${count}" checked>
+                              <span>${escapeHTML(bank.name)}</span>
+                              <small>${count} 道题</small>
+                            </label>
+                          `,
+                        )
+                        .join('')}
+                    </div>
+                  </section>
+                `,
+              )
+              .join('')}
+          </div>
+          <p class="library-export-summary" data-export-summary></p>
+          <p class="library-export-note">
+            ${icon('info', 14)}
+            题目、答案、解析、收藏和每道题的练习统计会随文件保存；每日学习历史和正确率折线不包含在题库文件中。
+          </p>
+        </div>
+      `,
+      footer: `
+        <button type="button" class="btn subtle" data-export-cancel>取消</button>
+        <button type="button" class="btn primary" data-export-confirm>${icon('download', 15)} 导出为一个文件</button>
+      `,
+      onMount: ({ dialog, close }) => {
+        const bankInputs = [...dialog.querySelectorAll('[data-export-bank]')];
+        const subjectInputs = [...dialog.querySelectorAll('[data-export-subject]')];
+        const summary = dialog.querySelector('[data-export-summary]');
+        const confirmButton = dialog.querySelector('[data-export-confirm]');
+
+        const refresh = () => {
+          let bankCount = 0;
+          let questionCount = 0;
+          const subjectIds = new Set();
+          for (const input of bankInputs) {
+            if (!input.checked) continue;
+            bankCount += 1;
+            questionCount += Number(input.dataset.questionCount) || 0;
+            subjectIds.add(input.dataset.subjectId);
+          }
+          for (const input of subjectInputs) {
+            const group = bankInputs.filter(
+              (bankInput) => bankInput.dataset.subjectId === input.dataset.exportSubject,
+            );
+            const checked = group.filter((bankInput) => bankInput.checked).length;
+            input.checked = checked > 0 && checked === group.length;
+            input.indeterminate = checked > 0 && checked < group.length;
+          }
+          if (summary) {
+            summary.textContent = `已选 ${subjectIds.size} 个科目 · ${bankCount} 个子题库 · ${questionCount} 道题`;
+          }
+          if (confirmButton) {
+            confirmButton.disabled = questionCount === 0;
+            confirmButton.innerHTML =
+              questionCount === 0
+                ? '没有可导出的题目'
+                : `${icon('download', 15)} 导出为一个文件 · ${questionCount} 道题`;
+          }
+        };
+
+        dialog.querySelector('[data-export-all]')?.addEventListener('click', () => {
+          bankInputs.forEach((input) => {
+            input.checked = true;
+          });
+          refresh();
+        });
+        dialog.querySelector('[data-export-none]')?.addEventListener('click', () => {
+          bankInputs.forEach((input) => {
+            input.checked = false;
+          });
+          refresh();
+        });
+        subjectInputs.forEach((input) => {
+          input.addEventListener('change', () => {
+            bankInputs
+              .filter((bankInput) => bankInput.dataset.subjectId === input.dataset.exportSubject)
+              .forEach((bankInput) => {
+                bankInput.checked = input.checked;
+              });
+            refresh();
+          });
+        });
+        bankInputs.forEach((input) => input.addEventListener('change', refresh));
+
+        dialog.querySelector('[data-export-cancel]')?.addEventListener('click', close);
+        confirmButton?.addEventListener('click', () => {
+          const bankIds = bankInputs
+            .filter((input) => input.checked)
+            .map((input) => input.dataset.exportBank);
+          const payload = exportLibraryPackage(app.state, { bankIds });
+          if (!payload.questions.length) {
+            toast('所选题库中没有可导出的题目。', 'info');
+            return;
+          }
+          downloadJSON(payload, `刷题助手题库-${localDateKey()}.json`);
+          close();
+          toast(
+            `已导出 ${payload.subjects.length} 个科目、${payload.banks.length} 个子题库、${payload.questions.length} 道题。`,
+            'success',
+            5000,
+          );
+        });
+        refresh();
+      },
+    });
+  }
+
+  function importLibraryDialog(root) {
+    let busy = false;
+    let statusNode = null;
+    let actionButtons = [];
+
+    const setStatus = (message, tone = '') => {
+      if (!statusNode) return;
+      statusNode.textContent = message;
+      statusNode.className = `library-import-status ${tone ? `is-${tone}` : ''}`.trim();
+    };
+
+    const setBusy = (value) => {
+      busy = value;
+      actionButtons.forEach((button) => {
+        button.disabled = value;
+      });
+    };
+
+    const applyPayload = async (payload) => {
+      setBusy(true);
+      setStatus('正在合并到本地题库…', 'pending');
+      try {
+        const result = importBackup(app.state, payload);
+        app.persist();
+        const parts = [`新增 ${result.added} 道题`];
+        if (result.skipped) parts.push(`合并 ${result.skipped} 道重复题`);
+        if (result.subjectsAdded) parts.push(`新增 ${result.subjectsAdded} 个科目`);
+        if (result.banksAdded) parts.push(`新增 ${result.banksAdded} 个子题库`);
+        control.close();
+        renderPage(root);
+        toast(`导入完成：${parts.join('，')}。`, result.added ? 'success' : 'info', 5000);
+        const synced = await app.syncLibrary({ notify: false });
+        if (!synced.ok) {
+          toast(
+            `导入内容已保留在当前浏览器，但写入 Markdown 失败：${
+              synced.error?.message || '未知错误'
+            }`,
+            'error',
+            6000,
+          );
+        }
+      } catch (error) {
+        setBusy(false);
+        setStatus(error.message || '导入失败，请检查文件格式。', 'error');
+        toast(`导入失败：${error.message || '文件格式不正确'}`, 'error', 4200);
+      }
+    };
+
+    const importMarkdownFiles = async (fileList) => {
+      if (busy) return;
+      const allFiles = [...(fileList || [])];
+      const files = allFiles.filter((file) => file.name.toLowerCase().endsWith('.md'));
+      if (!files.length) {
+        setStatus('请选择 .md 格式的 Markdown 题库文件。', 'error');
+        return;
+      }
+      if (files.length > 500) {
+        setStatus('一次最多导入 500 个 Markdown 文件，请分批导入。', 'error');
+        return;
+      }
+      const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+      if (totalSize > 20 * 1024 * 1024) {
+        setStatus('Markdown 文件总大小不能超过 20MB，请分批导入。', 'error');
+        return;
+      }
+
+      setBusy(true);
+      setStatus(`正在解析 ${files.length} 个 Markdown 文件…`, 'pending');
+      try {
+        const entries = [];
+        for (const file of files) {
+          entries.push({
+            path: file.webkitRelativePath || file.name,
+            text: await file.text(),
+          });
+        }
+        const response = await parseMarkdownBanks(entries);
+        const payload = parsedBanksToPayload(response.banks);
+        if (!payload.questions.length) throw new Error('Markdown 中没有可导入的题目。');
+        await applyPayload(payload);
+      } catch (error) {
+        setBusy(false);
+        setStatus(error.message || 'Markdown 解析失败。', 'error');
+        toast(`导入失败：${error.message || '文件格式不正确'}`, 'error', 4200);
+      }
+    };
+
+    const importJsonFile = async (file) => {
+      if (busy || !file) return;
+      if (file.size > 20 * 1024 * 1024) {
+        setStatus('JSON 题库文件不能超过 20MB。', 'error');
+        return;
+      }
+      setBusy(true);
+      setStatus('正在读取 JSON 题库文件…', 'pending');
+      try {
+        const payload = JSON.parse(await file.text());
+        await applyPayload(payload);
+      } catch (error) {
+        setBusy(false);
+        setStatus(error.message || 'JSON 文件格式不正确。', 'error');
+        toast(`导入失败：${error.message || '文件格式不正确'}`, 'error', 4200);
+      }
+    };
+
+    const importAnyFiles = (fileList) => {
+      if (busy) return;
+      const files = [...(fileList || [])];
+      if (!files.length) return;
+      const jsonFiles = files.filter((file) => file.name.toLowerCase().endsWith('.json'));
+      if (OFFLINE_MODE) {
+        if (jsonFiles.length !== 1 || files.length !== 1) {
+          setStatus('离线版一次只能导入一个由电脑端导出的 .json 题库文件。', 'error');
+          return;
+        }
+        importJsonFile(jsonFiles[0]);
+        return;
+      }
+      if (jsonFiles.length) {
+        if (files.length > 1) {
+          setStatus('JSON 题库文件一次只能选择一个；多个 Markdown 文件请单独选择。', 'error');
+          return;
+        }
+        importJsonFile(jsonFiles[0]);
+        return;
+      }
+      importMarkdownFiles(files);
+    };
+
+    const control = openDialog({
+      title: '导入题库',
+      eyebrow: 'IMPORT LIBRARY',
+      description: OFFLINE_MODE
+        ? '选择电脑端「导出题库」生成的单个 JSON 文件；内容会合并到平板上的离线题库。'
+        : '选择一个 JSON 题库文件，或选择一个/多个 Markdown 文件；内容会合并进现有题库，不会覆盖已有题目。',
+      size: 'md',
+      content: `
+        <div class="library-import">
+          <section class="library-import-card">
+            <span class="library-import-icon">${icon('upload', 20)}</span>
+            <div>
+              <h3>选择本地题库文件</h3>
+              <p>${
+                OFFLINE_MODE
+                  ? '在电脑端打开「我的题库 → 导出题库」，勾选需要的科目或子题库并导出为一个 JSON 文件，然后在这里选择它。'
+                  : '推荐使用「导出题库」生成的单个 .json 文件，也可以选择刷题助手生成的 .md 文件。JSON 会保留每道题的练习统计，Markdown 只包含题目内容。'
+              }</p>
+              <div class="library-import-actions">
+                <button type="button" class="btn primary" data-import-action data-import-any-button>
+                  ${icon('upload', 15)} ${OFFLINE_MODE ? '选择 .json 文件' : '选择 .json / .md 文件'}
+                </button>
+                ${
+                  OFFLINE_MODE
+                    ? ''
+                    : `<button type="button" class="btn subtle" data-import-action data-import-folder-button>
+                         ${icon('folder', 15)} 选择题库文件夹
+                       </button>`
+                }
+              </div>
+              <input type="file" hidden ${OFFLINE_MODE ? '' : 'multiple'} accept="${OFFLINE_MODE ? '.json,application/json' : '.json,.md,application/json,text/markdown'}" data-import-md-files>
+              ${OFFLINE_MODE ? '' : '<input type="file" hidden multiple webkitdirectory directory data-import-md-folder>'}
+            </div>
+          </section>
+          <p class="library-import-status" data-import-status role="status"></p>
+        </div>
+      `,
+      footer: '<button type="button" class="btn subtle" data-import-close>关闭</button>',
+      onMount: ({ dialog, close }) => {
+        statusNode = dialog.querySelector('[data-import-status]');
+        actionButtons = [...dialog.querySelectorAll('[data-import-action]')];
+        const anyInput = dialog.querySelector('[data-import-md-files]');
+        const folderInput = dialog.querySelector('[data-import-md-folder]');
+
+        dialog.querySelector('[data-import-any-button]')?.addEventListener('click', () => {
+          if (!busy) anyInput?.click();
+        });
+        dialog.querySelector('[data-import-folder-button]')?.addEventListener('click', () => {
+          if (!busy) folderInput?.click();
+        });
+        anyInput?.addEventListener('change', () => {
+          const files = [...(anyInput.files || [])];
+          anyInput.value = '';
+          importAnyFiles(files);
+        });
+        folderInput?.addEventListener('change', () => {
+          const files = [...(folderInput.files || [])];
+          folderInput.value = '';
+          importMarkdownFiles(files);
+        });
+        dialog.querySelector('[data-import-close]')?.addEventListener('click', close);
+      },
+    });
   }
 
   function bulkEditDialog(root) {
@@ -1099,6 +1538,22 @@ export function createLibraryView(app) {
         }
         if (action === 'ai-inspect') {
           app.openContextAIAssistant();
+          return;
+        }
+        if (action === 'import-library') {
+          importLibraryDialog(root);
+          return;
+        }
+        if (action === 'offline-guide') {
+          app.openOfflineSetupGuide();
+          return;
+        }
+        if (action === 'share-library') {
+          app.openShareLibraryDialog();
+          return;
+        }
+        if (action === 'export-library') {
+          exportLibraryDialog();
           return;
         }
         if (action === 'new-subject') {

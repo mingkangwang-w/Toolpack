@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#f6f8fa">
+    <meta name="description" content="刷题助手离线版：导入题库文件后，在平板上独立刷题，不需要电脑和网络。">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="刷题助手">
+    <title>刷题助手 · 离线版</title>
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="./offline-boot.js"></script>
+    <script src="./js/theme-init.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <button type="button" class="brand" data-nav="dashboard" aria-label="回到概览">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" fill="none">
+              <rect x="6" y="4.5" width="20" height="23" rx="4.5" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M11 11h10M11 15.5h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              <path d="m11 21 2.2 2.2 4.3-4.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="brand-copy">
+            <strong>刷题助手</strong>
+            <small>IMAGE TO PRACTICE</small>
+          </span>
+        </button>
+
+        <div class="side-label">工作台</div>
+        <nav class="side-nav" aria-label="主导航">
+          <button type="button" class="nav-item" data-nav="dashboard">
+            <span class="nav-icon" data-nav-icon="dashboard"></span>
+            <span>概览</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="practice">
+            <span class="nav-icon" data-nav-icon="play"></span>
+            <span>开始刷题</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="import">
+            <span class="nav-icon" data-nav-icon="scan"></span>
+            <span>导入题目</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="library">
+            <span class="nav-icon" data-nav-icon="book"></span>
+            <span>我的题库</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="sidebar-local">
+          <span class="local-mark"><i></i> LOCAL FIRST</span>
+          <p>本地 OCR 处理图片；<br>AI 只接收提取出的文字，不接收图片。</p>
+        </div>
+
+        <div class="sidebar-tools">
+          <button type="button" class="sidebar-tool" data-global-action="ai">
+            <span data-static-icon="sparkles"></span>
+            <span>AI 设置</span>
+          </button>
+          <button type="button" class="sidebar-tool" data-global-action="data">
+            <span data-static-icon="database"></span>
+            <span>数据备份</span>
+          </button>
+          <button type="button" class="sidebar-tool" data-global-action="theme">
+            <span data-theme-icon></span>
+            <span data-theme-label>深色模式</span>
+          </button>
+        </div>
+
+        <p class="sidebar-foot">本地运行 · 无账号 · 数据属于你</p>
+      </aside>
+
+      <div class="app-main">
+        <header class="mobile-topbar">
+          <button type="button" class="mobile-brand" data-nav="dashboard" aria-label="回到概览">
+            <span class="brand-mark small" aria-hidden="true">
+              <svg viewBox="0 0 32 32" fill="none">
+                <rect x="6" y="4.5" width="20" height="23" rx="4.5" stroke="currentColor" stroke-width="1.8"/>
+                <path d="M11 11h10M11 15.5h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                <path d="m11 21 2.2 2.2 4.3-4.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <strong>刷题助手</strong>
+          </button>
+          <div class="mobile-top-actions">
+            <button type="button" class="icon-btn" data-global-action="ai" aria-label="AI 设置">
+              <span data-static-icon="sparkles"></span>
+            </button>
+            <button type="button" class="icon-btn" data-global-action="data" aria-label="数据备份">
+              <span data-static-icon="database"></span>
+            </button>
+            <button type="button" class="icon-btn" data-global-action="theme" aria-label="切换主题">
+              <span data-theme-icon></span>
+            </button>
+          </div>
+        </header>
+
+        <main id="main-content" class="main-content" tabindex="-1"></main>
+      </div>
+
+      <nav class="mobile-tabbar" aria-label="移动端导航">
+        <button type="button" class="mobile-tab" data-nav="dashboard">
+          <span data-nav-icon="dashboard"></span><em>概览</em>
+        </button>
+        <button type="button" class="mobile-tab" data-nav="practice">
+          <span data-nav-icon="play"></span><em>刷题</em>
+        </button>
+        <button type="button" class="mobile-tab" data-nav="import">
+          <span data-nav-icon="scan"></span><em>导入</em>
+        </button>
+        <button type="button" class="mobile-tab" data-nav="library">
+          <span data-nav-icon="book"></span><em>题库</em>
+        </button>
+      </nav>
+    </div>
+
+    <button type="button" class="ai-fab" data-global-action="assistant" aria-label="打开 AI 助手">
+      <span data-static-icon="sparkles"></span>
+      <span class="ai-fab-label">AI 助手</span>
+    </button>
+
+    <div id="toast-host" class="toast-host" role="status" aria-live="polite"></div>
+    <script type="module" src="./js/app.js"></script>
+  </body>
+</html>

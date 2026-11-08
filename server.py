@@ -25,10 +25,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from library_store import LibraryError, load_library, sync_library
+from library_share import LibraryShareManager
+from library_store import LibraryError, load_library, parse_bank_files, sync_library
 
-ROOT = Path(__file__).resolve().parent
-WEB_ROOT = ROOT / "web"
+if getattr(sys, "frozen", False):
+    # PyInstaller 便携版：数据写在 exe 旁边，网页资源在打包目录中。
+    ROOT = Path(sys.executable).resolve().parent
+    RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", ROOT))
+else:
+    ROOT = Path(__file__).resolve().parent
+    RESOURCE_ROOT = ROOT
+WEB_ROOT = RESOURCE_ROOT / "web"
 LIBRARY_ROOT = (ROOT / "题库保存").resolve()
 MAX_BODY_BYTES = 40 * 1024 * 1024
 MAX_IMAGE_SIDE = 3200
@@ -42,6 +49,7 @@ AI_CONFIG_BODY_LIMIT = 512 * 1024
 AI_TEXT_BODY_LIMIT = 512 * 1024
 AI_INSTRUCTIONS_LIMIT = 8000
 LIBRARY_BODY_LIMIT = 24 * 1024 * 1024
+SHARE_BODY_LIMIT = 4 * 1024
 AI_REQUEST_TIMEOUT = 180
 AI_MAX_ATTEMPTS = 3
 AI_RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
@@ -49,6 +57,7 @@ AI_RETRY_BASE_DELAY = 1.2
 AI_RETRY_MAX_DELAY = 20.0
 AI_CONFIG_LOCK = threading.Lock()
 LIBRARY_LOCK = threading.Lock()
+SHARE_MANAGER: LibraryShareManager | None = None
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1495,6 +1504,37 @@ class Handler(BaseHTTPRequestHandler):
         result["ok"] = True
         self._send_json(HTTPStatus.OK, result)
 
+    def _handle_library_parse_md(self, payload: dict) -> None:
+        try:
+            banks = parse_bank_files(payload.get("files"), default_subject="导入题库")
+        except LibraryError as exc:
+            raise RequestProblem(str(exc)) from exc
+        self._send_json(HTTPStatus.OK, {"ok": True, "banks": banks})
+
+    def _handle_share_status(self) -> None:
+        manager = SHARE_MANAGER
+        if manager is None:
+            self._send_json(HTTPStatus.OK, {"ok": True, "active": False})
+            return
+        self._send_json(HTTPStatus.OK, manager.status())
+
+    def _handle_share_start(self) -> None:
+        manager = SHARE_MANAGER
+        if manager is None:
+            raise RequestProblem("题库分享服务未初始化。", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        try:
+            result = manager.start()
+        except LibraryError as exc:
+            raise RequestProblem(str(exc), status=HTTPStatus.CONFLICT) from exc
+        self._send_json(HTTPStatus.OK, result)
+
+    def _handle_share_stop(self) -> None:
+        manager = SHARE_MANAGER
+        if manager is None:
+            self._send_json(HTTPStatus.OK, {"ok": True, "active": False})
+            return
+        self._send_json(HTTPStatus.OK, manager.stop())
+
     def do_GET(self):  # noqa: N802
         try:
             self._handle_get()
@@ -1536,6 +1576,10 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_library_load()
             return
 
+        if parsed.path == "/api/share/status":
+            self._handle_share_status()
+            return
+
         if parsed.path == "/api/ai/config":
             self._send_json(HTTPStatus.OK, public_ai_config())
             return
@@ -1575,6 +1619,9 @@ class Handler(BaseHTTPRequestHandler):
         limits = {
             "/api/ocr": MAX_BODY_BYTES,
             "/api/library/sync": LIBRARY_BODY_LIMIT,
+            "/api/library/parse-md": LIBRARY_BODY_LIMIT,
+            "/api/share/start": SHARE_BODY_LIMIT,
+            "/api/share/stop": SHARE_BODY_LIMIT,
             "/api/ai/analyze": AI_TEXT_BODY_LIMIT,
             "/api/ai/interact": AI_TEXT_BODY_LIMIT,
             "/api/ai/config": AI_CONFIG_BODY_LIMIT,
@@ -1590,6 +1637,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_ocr(payload)
             elif parsed.path == "/api/library/sync":
                 self._handle_library_sync(payload)
+            elif parsed.path == "/api/library/parse-md":
+                self._handle_library_parse_md(payload)
+            elif parsed.path == "/api/share/start":
+                self._handle_share_start()
+            elif parsed.path == "/api/share/stop":
+                self._handle_share_stop()
             elif parsed.path == "/api/ai/config":
                 self._handle_ai_config_save(payload)
             elif parsed.path == "/api/ai/test":
@@ -1652,8 +1705,9 @@ def main() -> int:
     parser.add_argument("--no-warm", action="store_true")
     args = parser.parse_args()
 
-    global LIBRARY_ROOT
+    global LIBRARY_ROOT, SHARE_MANAGER
     LIBRARY_ROOT = Path(args.library_dir).expanduser().resolve()
+    SHARE_MANAGER = LibraryShareManager(LIBRARY_ROOT, library_lock=LIBRARY_LOCK)
 
     port = args.port
     url = f"http://127.0.0.1:{port}/"
@@ -1693,6 +1747,8 @@ def main() -> int:
     except KeyboardInterrupt:
         log("\n已停止刷题助手。")
     finally:
+        if SHARE_MANAGER is not None:
+            SHARE_MANAGER.stop()
         server.server_close()
     return 0
 

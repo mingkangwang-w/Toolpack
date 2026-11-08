@@ -91,6 +91,77 @@ export async function syncLibraryToDisk({ subjects, banks, questions }) {
   }
 }
 
+export async function getShareStatus() {
+  const timeout = timeoutSignal(10_000);
+  try {
+    const response = await fetch('/api/share/status', { signal: timeout.signal });
+    return await readApiResponse(response);
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('读取分享状态超时。');
+    if (error instanceof TypeError) throw new Error('无法连接本地服务，请确认启动窗口仍然打开。');
+    throw error;
+  } finally {
+    timeout.clear();
+  }
+}
+
+export async function startShare() {
+  const timeout = timeoutSignal(10_000);
+  try {
+    const response = await fetch('/api/share/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: timeout.signal,
+    });
+    return await readApiResponse(response);
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('启动分享超时。');
+    if (error instanceof TypeError) throw new Error('无法连接本地服务，请确认启动窗口仍然打开。');
+    throw error;
+  } finally {
+    timeout.clear();
+  }
+}
+
+export async function stopShare() {
+  const timeout = timeoutSignal(10_000);
+  try {
+    const response = await fetch('/api/share/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: timeout.signal,
+    });
+    return await readApiResponse(response);
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('停止分享超时。');
+    if (error instanceof TypeError) throw new Error('无法连接本地服务，请确认启动窗口仍然打开。');
+    throw error;
+  } finally {
+    timeout.clear();
+  }
+}
+
+export async function parseMarkdownBanks(files) {
+  const timeout = timeoutSignal(120_000);
+  try {
+    const response = await fetch('/api/library/parse-md', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files }),
+      signal: timeout.signal,
+    });
+    return await readApiResponse(response);
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('解析 Markdown 题库超时，请减少文件数量后重试。');
+    if (error instanceof TypeError) throw new Error('无法连接本地题库服务，请确认启动窗口仍然打开。');
+    throw error;
+  } finally {
+    timeout.clear();
+  }
+}
+
 export async function checkHealth() {
   const timeout = timeoutSignal(4_000);
   try {

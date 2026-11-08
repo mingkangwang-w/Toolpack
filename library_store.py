@@ -686,6 +686,56 @@ def _scan_layout(root: Path) -> list[dict]:
     return subjects
 
 
+def parse_bank_files(files: list[dict], default_subject: str = "导入题库") -> list[dict]:
+    """解析从网页上传的 Markdown 子题库文件，不写入磁盘。"""
+    if not isinstance(files, list) or not files:
+        raise LibraryError("没有收到 Markdown 题库文件。")
+    if len(files) > 500:
+        raise LibraryError("一次最多导入 500 个 Markdown 文件。")
+
+    results: list[dict] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        raw_path = _clean_text(item.get("path") or item.get("name"), 800).replace("\\", "/")
+        text = _clean_text(item.get("text"), 4_000_000)
+        if not text.strip():
+            continue
+
+        parts = [part for part in raw_path.split("/") if part and part not in {".", ".."}]
+        filename = parts[-1] if parts else "导入题库.md"
+        meta = _extract_meta(text, BANK_META_RE) or {}
+        bank_name = _clean_name(Path(filename).stem) or _clean_name(meta.get("name")) or "导入题库"
+
+        subject_name = _clean_name(parts[-2]) if len(parts) >= 2 else ""
+        if not subject_name:
+            subject_name = _clean_name(meta.get("subjectName"))
+        if not subject_name:
+            subject_name = _clean_name(default_subject) or "导入题库"
+
+        bank_key = hashlib.sha1(f"{subject_name}/{bank_name}".encode("utf-8")).hexdigest()[:16]
+        questions: list[dict] = []
+        for index, match in enumerate(QUESTION_RE.finditer(text), start=1):
+            question = _parse_question(match.group(1), index, f"import_{bank_key}")
+            if not question:
+                continue
+            question.pop("bankId", None)
+            questions.append(question)
+
+        if questions:
+            results.append(
+                {
+                    "subjectName": subject_name,
+                    "bankName": bank_name,
+                    "questions": questions,
+                }
+            )
+
+    if not results:
+        raise LibraryError("没有从 Markdown 文件中解析出题目。请确认文件是刷题助手生成的题库格式。")
+    return results
+
+
 def load_library(root: Path) -> dict:
     """从「题库保存」目录读取科目和 Markdown 子题库。"""
     root = Path(root)

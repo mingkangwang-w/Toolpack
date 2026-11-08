@@ -1,6 +1,6 @@
 import {
   banksForSubject,
-  getAccuracySeries,
+  getRecentAccuracySeries,
   getStats,
   historySummary,
   isQuestionAnswerable,
@@ -15,6 +15,7 @@ import {
   todayChinese,
   typeClass,
 } from '../ui.js';
+import { OFFLINE_MODE } from '../runtime.js';
 
 function heroArtHTML() {
   return `
@@ -71,14 +72,12 @@ function formatStudyDuration(milliseconds) {
   return rest ? `${hours} 小时 ${rest} 分` : `${hours} 小时`;
 }
 
-function chartDateFull(dateKey) {
-  const [, month, day] = String(dateKey || '').split('-');
-  return `${Number(month) || '—'} 月 ${Number(day) || '—'} 日`;
-}
-
-function chartDateShort(dateKey) {
-  const [, month, day] = String(dateKey || '').split('-');
-  return `${Number(month) || '—'}/${Number(day) || '—'}`;
+function chartAttemptTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${hours}:${minutes}`;
 }
 
 function normalizeTrendSelection(state, selection) {
@@ -171,19 +170,11 @@ function trendToolbarHTML(state, selection) {
 }
 
 function trendSeriesSummary(series) {
-  let answered = 0;
-  let correct = 0;
-  let activeDays = 0;
-  for (const point of series) {
-    answered += point.answered;
-    correct += point.correct;
-    if (point.answered > 0) activeDays += 1;
-  }
+  const latest = series[series.length - 1];
   return {
-    answered,
-    correct,
-    activeDays,
-    accuracy: answered > 0 ? Math.round((correct / answered) * 100) : null,
+    answered: series.length,
+    correct: latest?.correct || 0,
+    accuracy: latest?.accuracy ?? null,
   };
 }
 
@@ -206,7 +197,6 @@ function accuracyChartSVG(series, scopeLabel) {
   }));
   const valid = points.filter((point) => point.y !== null);
 
-  // 没有作答的日期不画点，但折线会直接连接前后有数据的日期。
   const path = valid
     .map(
       (point, index) =>
@@ -236,14 +226,13 @@ function accuracyChartSVG(series, scopeLabel) {
       const point = points[index];
       if (!point) return '';
       const anchor = index === 0 ? 'start' : index === count - 1 ? 'end' : 'middle';
-      return `<text class="trend-axis-label" x="${point.x}" y="${height - 8}" text-anchor="${anchor}">${chartDateShort(point.date)}</text>`;
+      return `<text class="trend-axis-label" x="${point.x}" y="${height - 8}" text-anchor="${anchor}">第 ${point.attemptNumber} 次</text>`;
     })
     .join('');
 
   const circles = valid
     .map((point) => {
-      const date = chartDateFull(point.date);
-      const label = `${date}，正确率 ${point.accuracy}%，作答 ${point.answered} 道`;
+      const label = `第 ${point.attemptNumber} 次，本次${point.attemptCorrect ? '答对' : '答错'}，累计正确率 ${point.accuracy}%`;
       return `
         <circle class="trend-point" cx="${point.x}" cy="${point.y}" r="4"
           data-trend-index="${point.index}" tabindex="0" role="img"
@@ -261,12 +250,16 @@ function accuracyChartSVG(series, scopeLabel) {
 
   const hoverData = encodeURIComponent(
     JSON.stringify(
-      series.map(({ date, answered, correct, accuracy }) => ({
-        date,
-        answered,
-        correct,
-        accuracy,
-      })),
+      series.map(
+        ({ at, attemptNumber, attemptCorrect, answered, correct, accuracy }) => ({
+          at,
+          attemptNumber,
+          attemptCorrect,
+          answered,
+          correct,
+          accuracy,
+        }),
+      ),
     ),
   );
 
@@ -275,8 +268,8 @@ function accuracyChartSVG(series, scopeLabel) {
       data-chart-left="${left}" data-chart-top="${top}"
       data-chart-width="${plotWidth}" data-chart-height="${plotHeight}"
       data-chart-count="${count}" data-series="${hoverData}"
-      role="img" aria-label="${escapeHTML(scopeLabel)}近 30 天正确率折线图">
-      <title>${escapeHTML(scopeLabel)}近 30 天正确率折线图</title>
+      role="img" aria-label="${escapeHTML(scopeLabel)}最近 30 次正确率折线图">
+      <title>${escapeHTML(scopeLabel)}最近 30 次正确率折线图</title>
       ${gridLines}
       ${xLabels}
       <line class="trend-crosshair" data-trend-crosshair
@@ -291,22 +284,22 @@ function accuracyChartSVG(series, scopeLabel) {
 }
 
 function trendDataTableHTML(series, scopeLabel) {
-  const rows = series.filter((point) => point.answered > 0);
-  if (!rows.length) return '';
+  if (!series.length) return '';
   return `
     <details class="trend-data-table">
       <summary>查看数据表</summary>
       <div class="trend-table-scroll">
-        <table aria-label="${escapeHTML(scopeLabel)}近 30 天正确率数据">
-          <thead><tr><th>日期</th><th>作答</th><th>正确</th><th>正确率</th></tr></thead>
+        <table aria-label="${escapeHTML(scopeLabel)}最近 30 次正确率数据">
+          <thead><tr><th>次数</th><th>时间</th><th>本次</th><th>累计</th><th>正确率</th></tr></thead>
           <tbody>
-            ${rows
+            ${series
               .map(
                 (point) => `
                 <tr>
-                  <td>${chartDateFull(point.date)}</td>
-                  <td>${point.answered}</td>
-                  <td>${point.correct}</td>
+                  <td>第 ${point.attemptNumber} 次</td>
+                  <td>${chartAttemptTime(point.at)}</td>
+                  <td>${point.attemptCorrect ? '答对' : '答错'}</td>
+                  <td>${point.correct}/${point.answered}</td>
                   <td>${point.accuracy}%</td>
                 </tr>
               `,
@@ -320,25 +313,24 @@ function trendDataTableHTML(series, scopeLabel) {
 }
 
 function trendChartBodyHTML(state, selection) {
-  const series = getAccuracySeries(state, {
+  const series = getRecentAccuracySeries(state, {
     subjectId: selection.subjectId,
     bankId: selection.bankId,
-    days: 30,
+    limit: 30,
   });
   const summary = trendSeriesSummary(series);
   const scopeLabel = trendScopeLabel(state, selection);
-  const scoped = Boolean(selection.subjectId);
-  const hasData = series.some((point) => point.accuracy !== null);
+  const hasData = series.length > 0;
   return `
     <div class="trend-chart-heading">
       <div>
-        <span class="eyebrow">ACCURACY · 近 30 天</span>
-        <h3>正确率变化</h3>
-        <p>${escapeHTML(scopeLabel)}</p>
+        <span class="eyebrow">ACCURACY · 最近 30 次</span>
+        <h3>最近 30 次正确率</h3>
+        <p>${escapeHTML(scopeLabel)} · 仅统计完整结束的练习，中途退出不计入</p>
       </div>
       <div class="trend-kpi">
         <strong>${summary.accuracy === null ? '—' : `${summary.accuracy}%`}</strong>
-        <span>${summary.answered} 道作答 · ${summary.activeDays} 天有练习</span>
+        <span>最近 ${summary.answered} 次作答 · ${summary.correct} 次正确</span>
       </div>
     </div>
     ${
@@ -354,12 +346,8 @@ function trendChartBodyHTML(state, selection) {
         : `<div class="trend-empty">
             <span>${icon('chart-line', 26)}</span>
             <div>
-              <strong>近 30 天暂无作答记录</strong>
-              <p>${
-                scoped
-                  ? '按科目和子题库的统计从本次更新后开始记录，完成练习后就会出现在这里。'
-                  : '完成练习后，这里会显示正确率的变化。'
-              }</p>
+              <strong>最近还没有作答记录</strong>
+              <p>按作答次数统计从本次更新后开始记录；完整结束一组练习后，这里会显示最近 30 次提交的正确率变化，中途退出不会计入。</p>
             </div>
           </div>`
     }
@@ -372,7 +360,7 @@ function learningInsightsHTML(state, monthly, selection) {
       <header class="panel-head insights-head">
         <div>
           <h2>学习统计</h2>
-          <p>近 30 天的学习时长与刷题量；正确率趋势一次只显示一个范围。</p>
+          <p>学习时长与刷题量按近 30 天统计；正确率折线按最近 30 次作答，仅统计完整结束的练习，一次只显示一个范围。</p>
         </div>
         <span class="insights-window">${icon('clock', 13)} 近 30 天</span>
       </header>
@@ -414,6 +402,42 @@ function learningInsightsHTML(state, monthly, selection) {
         <div class="trend-chart" data-trend-chart>
           ${trendChartBodyHTML(state, selection)}
         </div>
+      </div>
+    </section>
+  `;
+}
+
+function offlineOnboardingHTML() {
+  return `
+    <section class="onboarding-panel panel">
+      <div class="onboarding-head">
+        <div>
+          <p class="eyebrow">OFFLINE PRACTICE</p>
+          <h2>三步，开始离线刷题。</h2>
+        </div>
+        <button type="button" class="btn primary" data-action="offline-guide">
+          ${icon('list', 17)} 开始配置题库
+        </button>
+      </div>
+      <div class="onboarding-steps">
+        <article>
+          <span class="step-number">01</span>
+          <span class="onboarding-icon">${icon('download', 22)}</span>
+          <h3>电脑端导出</h3>
+          <p>在电脑的「我的题库 → 导出题库」中勾选科目或子题库，导出一个 JSON 文件。</p>
+        </article>
+        <article>
+          <span class="step-number">02</span>
+          <span class="onboarding-icon">${icon('upload', 22)}</span>
+          <h3>平板导入</h3>
+          <p>打开「我的题库 → 导入题库」，选择 JSON 文件，题目会保存在这台平板上。</p>
+        </article>
+        <article>
+          <span class="step-number">03</span>
+          <span class="onboarding-icon">${icon('play', 22)}</span>
+          <h3>离线刷题</h3>
+          <p>之后不需要电脑和网络，练习、统计和错题都会保存在本地。</p>
+        </article>
       </div>
     </section>
   `;
@@ -596,15 +620,27 @@ export function createDashboardView(app) {
         <header class="page-header dashboard-header">
           <div class="page-heading">
             <p class="eyebrow">${escapeHTML(todayChinese())}</p>
-            <h1>${hasQuestions ? '今天，练几道？' : '把第一道题，<br>收进你的题库。'}</h1>
+            <h1>${
+              hasQuestions
+                ? '今天，练几道？'
+                : OFFLINE_MODE
+                  ? '导入题库，<br>开始离线刷题。'
+                  : '把第一道题，<br>收进你的题库。'
+            }</h1>
             <p class="page-sub">${
               hasQuestions
                 ? `${greeting()}。题库里还有 ${stats.unmastered} 道题等待掌握，按自己的节奏来。`
-                : '上传题目图片，识别文字、拆好选项，然后开始专注练习。'
+                : OFFLINE_MODE
+                  ? '在电脑端导出 JSON 题库文件，然后在「我的题库」中导入；之后不需要电脑和网络。'
+                  : '上传题目图片，识别文字、拆好选项，然后开始专注练习。'
             }</p>
           </div>
           <div class="header-actions">
-            <button type="button" class="btn subtle" data-action="import">${icon('image', 17)} 导入图片</button>
+            ${
+              OFFLINE_MODE
+                ? `<button type="button" class="btn subtle" data-action="offline-guide">${icon('list', 17)} 配置题库</button>`
+                : `<button type="button" class="btn subtle" data-action="import">${icon('image', 17)} 导入图片</button>`
+            }
             <button type="button" class="btn primary" data-action="practice" ${canPractice ? '' : 'disabled'}>
               ${icon('play', 16)} 开始刷题
             </button>
@@ -675,7 +711,9 @@ export function createDashboardView(app) {
                 ${recentQuestionsHTML(state)}
               </section>
             `
-            : onboardingHTML()
+            : OFFLINE_MODE
+              ? offlineOnboardingHTML()
+              : onboardingHTML()
         }
       </div>
     `;
@@ -704,6 +742,7 @@ export function createDashboardView(app) {
 
         const action = event.target.closest('[data-action]')?.dataset.action;
         if (action === 'import') app.navigate('import');
+        else if (action === 'offline-guide') app.openOfflineSetupGuide();
         else if (action === 'practice') app.navigate('practice');
         else if (action === 'library') app.navigate('library');
         else if (action === 'manual') app.openManualQuestion();
@@ -797,11 +836,11 @@ export function createDashboardView(app) {
       if (!canvas || !tooltip) return;
       const value = tooltip.querySelector('[data-trend-tooltip-value]');
       const label = tooltip.querySelector('[data-trend-tooltip-label]');
-      if (value) value.textContent = point.accuracy === null ? '无作答' : `${point.accuracy}%`;
+      if (value) value.textContent = `${point.accuracy}%`;
       if (label) {
-        label.textContent = `${chartDateFull(point.date)} · 作答 ${point.answered} 道${
-          point.answered ? ` · 正确 ${point.correct} 道` : ''
-        }`;
+        label.textContent = `第 ${point.attemptNumber} 次 · 本次${
+          point.attemptCorrect ? '答对' : '答错'
+        } · 累计 ${point.correct}/${point.answered}`;
       }
       tooltip.hidden = false;
 

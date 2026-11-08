@@ -17,9 +17,26 @@
     "test:ui:taxonomy": "node tests/ui-taxonomy.mjs",
     "test:ui:bank-reorder": "node tests/ui-bank-reorder.mjs",
     "test:ui:bulk-actions": "node tests/ui-bulk-actions.mjs",
+    "test:ui:library-import": "node tests/ui-library-import.mjs",
+    "test:ui:library-export": "node tests/ui-library-export.mjs",
+    "test:ui:study-time": "node tests/ui-study-time.mjs",
+    "test:ui:random-options": "node tests/ui-random-options.mjs",
+    "test:ui:midway-trend": "node tests/ui-midway-trend.mjs",
+    "test:ui:offline": "node tests/ui-offline.mjs",
+    "test:ui:lan-import": "node tests/ui-lan-import.mjs",
+    "test:ui:share": "node tests/ui-share.mjs",
     "test:ui:insights": "node tests/ui-insights.mjs",
     "test:ui:duplicates": "node tests/ui-duplicates.mjs",
     "test:ui:duplicate-ignore": "node tests/ui-duplicate-ignore.mjs",
     "test:ui:infinite": "node tests/ui-infinite.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.1",
+    "@capacitor/core": "^6.2.1",
+    "@capacitor/ios": "^6.2.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.1",
+    "playwright-core": "^1.65.0"
   }
 }

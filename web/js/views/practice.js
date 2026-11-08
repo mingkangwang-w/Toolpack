@@ -10,8 +10,10 @@ import {
   isWrittenAnswerType,
   QUESTION_TYPES,
   recordAttempt,
+  recordRecentAttempts,
   recordStudyDuration,
   scopeCount,
+  shuffleQuestionOptions,
   selectPracticeQuestions,
   subjectById,
 } from '../store.js';
@@ -24,6 +26,7 @@ import {
   typeClass,
 } from '../ui.js';
 import { createPracticeAIChat } from '../practice-ai.js';
+import { OFFLINE_MODE } from '../runtime.js';
 
 const SCOPE_META = {
   all: { label: '全部题目', desc: '所有已录入答案的题', icon: 'layers' },
@@ -298,22 +301,26 @@ function setupTemplate(state, setup) {
             }</p>
           </div>
 
-          <div class="setup-section">
-            <div class="setup-section-head">
-              <span class="setup-index">06</span>
-              <div><h2>AI 辅导</h2><p>不需要时可以关闭侧栏，换成更专注的界面。</p></div>
-            </div>
-            <label class="setting-toggle">
-              <span class="setting-toggle-copy">
-                <b>显示 AI 辅导侧栏</b>
-                <small>练习中随时向 AI 提问；关闭后仍可从题目右上角临时打开。</small>
-              </span>
-              <span class="switch-control">
-                <input type="checkbox" data-role="practice-show-ai" ${setup.showAI ? 'checked' : ''}>
-                <span class="switch-track" aria-hidden="true"><span></span></span>
-              </span>
-            </label>
-          </div>
+          ${
+            OFFLINE_MODE
+              ? ''
+              : `<div class="setup-section">
+                  <div class="setup-section-head">
+                    <span class="setup-index">06</span>
+                    <div><h2>AI 辅导</h2><p>不需要时可以关闭侧栏，换成更专注的界面。</p></div>
+                  </div>
+                  <label class="setting-toggle">
+                    <span class="setting-toggle-copy">
+                      <b>显示 AI 辅导侧栏</b>
+                      <small>练习中随时向 AI 提问；关闭后仍可从题目右上角临时打开。</small>
+                    </span>
+                    <span class="switch-control">
+                      <input type="checkbox" data-role="practice-show-ai" ${setup.showAI ? 'checked' : ''}>
+                      <span class="switch-track" aria-hidden="true"><span></span></span>
+                    </span>
+                  </label>
+                </div>`
+          }
 
           <div class="setup-start-row">
             <div class="setup-start-copy">
@@ -534,7 +541,7 @@ export function createPracticeView(app) {
     count: app.state.settings.practiceCount || 10,
     shuffle: app.state.settings.practiceShuffle !== false,
     infinite: app.state.settings.practiceInfinite === true,
-    showAI: app.state.settings.practiceShowAI !== false,
+    showAI: OFFLINE_MODE ? false : app.state.settings.practiceShowAI !== false,
     feedbackMode: normalizeFeedbackMode(app.state.settings.practiceFeedbackMode),
     subjectId: '',
     bankId: '',
@@ -544,12 +551,16 @@ export function createPracticeView(app) {
     setup.feedbackMode = 'immediate';
   }
   let keyHandlerInstalled = false;
+  let studyClockInstalled = false;
+  let studyIdleTimer = null;
+  const STUDY_IDLE_MS = 90_000;
 
   function currentQuestion() {
     return session?.questions[session.index] || null;
   }
 
   function ensurePracticeAI() {
+    if (OFFLINE_MODE) return null;
     if (!practiceAI) {
       practiceAI = createPracticeAIChat({
         getConfig: getAssistantConfig,
@@ -579,6 +590,7 @@ export function createPracticeView(app) {
   }
 
   function showPracticeAI() {
+    if (OFFLINE_MODE) return;
     setup.showAI = true;
     persistSetup();
     if (screen === 'session') {
@@ -588,6 +600,7 @@ export function createPracticeView(app) {
   }
 
   function resetSession() {
+    stopStudyClock();
     disposePracticeAI();
     session = null;
     screen = 'setup';
@@ -677,6 +690,13 @@ export function createPracticeView(app) {
       return;
     }
 
+    const shuffleOptionsForSession =
+      options.shuffle !== undefined ? Boolean(options.shuffle) : setup.shuffle;
+    if (shuffleOptionsForSession) {
+      // 只改本次练习中的展示副本，题库原题保持不变。
+      questions = questions.map((question) => shuffleQuestionOptions(question));
+    }
+
     session = {
       questions,
       index: 0,
@@ -686,13 +706,16 @@ export function createPracticeView(app) {
       result: null,
       given: '',
       records: [],
+      recentAttempts: [],
       outcomes: Array(questions.length).fill(null),
       answers: Array(questions.length).fill(null),
       skipped: 0,
       startedAt: Date.now(),
       finishedAt: null,
       lastTickAt: Date.now(),
+      lastActivityAt: Date.now(),
       pendingDurationMs: 0,
+      shuffleOptions: shuffleOptionsForSession,
       label,
       feedbackMode: setup.feedbackMode,
       total: questions.length,
@@ -701,6 +724,7 @@ export function createPracticeView(app) {
       infiniteQueue: infinitePool.slice(1),
     };
     screen = 'session';
+    resumeStudyClock();
     ensurePracticeAI();
     renderCurrent();
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -712,12 +736,87 @@ export function createPracticeView(app) {
     return { correct, wrong, answered: session.records.length };
   }
 
+  function isStudyClockAllowed() {
+    return (
+      screen === 'session' &&
+      Boolean(session) &&
+      document.visibilityState === 'visible' &&
+      !document.querySelector('dialog[open]')
+    );
+  }
+
+  function clearStudyIdleTimer() {
+    if (studyIdleTimer) {
+      window.clearTimeout(studyIdleTimer);
+      studyIdleTimer = null;
+    }
+  }
+
+  function scheduleStudyIdle() {
+    clearStudyIdleTimer();
+    if (!isStudyClockAllowed()) return;
+    studyIdleTimer = window.setTimeout(() => {
+      studyIdleTimer = null;
+      if (!session || screen !== 'session') return;
+      // 允许一段阅读时间，但把超过空置阈值的时间排除在计时之外。
+      const now = Date.now();
+      const idleEnd = Math.min(now, (session.lastActivityAt || now) + STUDY_IDLE_MS);
+      pauseStudyClock(idleEnd);
+    }, STUDY_IDLE_MS);
+  }
+
+  function pauseStudyClock(endAt = Date.now()) {
+    if (!session) return;
+    const end = Math.max(0, Math.min(endAt, Date.now()));
+    const active = session.lastTickAt ? Math.max(0, end - session.lastTickAt) : 0;
+    const duration = (session.pendingDurationMs || 0) + active;
+    session.pendingDurationMs = 0;
+    session.lastTickAt = null;
+    clearStudyIdleTimer();
+    if (duration >= 1000) {
+      recordStudyDuration(app.state, duration);
+      app.persist();
+    }
+  }
+
+  function resumeStudyClock() {
+    if (!session || !isStudyClockAllowed()) return;
+    const now = Date.now();
+    if (!session.lastTickAt) session.lastTickAt = now;
+    session.lastActivityAt = now;
+    scheduleStudyIdle();
+  }
+
+  function stopStudyClock() {
+    clearStudyIdleTimer();
+    if (session) {
+      session.pendingDurationMs = 0;
+      session.lastTickAt = null;
+    }
+  }
+
+  function markStudyActivity() {
+    if (!session || screen !== 'session') return;
+    if (!isStudyClockAllowed()) {
+      if (session.lastTickAt) pauseStudyClock();
+      return;
+    }
+    const now = Date.now();
+    session.lastActivityAt = now;
+    if (!session.lastTickAt) session.lastTickAt = now;
+    scheduleStudyIdle();
+  }
+
   function consumeStudyDuration() {
     if (!session) return 0;
     const now = Date.now();
-    const duration = (session.pendingDurationMs || 0) + Math.max(0, now - (session.lastTickAt || now));
+    const active = session.lastTickAt ? Math.max(0, now - session.lastTickAt) : 0;
+    const duration = (session.pendingDurationMs || 0) + active;
     session.pendingDurationMs = 0;
-    session.lastTickAt = now;
+    session.lastActivityAt = now;
+    session.lastTickAt = isStudyClockAllowed() ? now : null;
+    if (session.lastTickAt) scheduleStudyIdle();
+    else clearStudyIdleTimer();
     return duration;
   }
 
@@ -759,10 +858,20 @@ export function createPracticeView(app) {
     window.scrollTo({ top: 0, behavior: scroll });
   }
 
+  function commitSessionRecentAttempts() {
+    if (!session?.recentAttempts?.length) return;
+    recordRecentAttempts(app.state, session.recentAttempts);
+    session.recentAttempts = [];
+    app.persist();
+  }
+
   function finishSession({ manual = false } = {}) {
     if (!session) return;
     flushStudyDuration();
+    stopStudyClock();
     saveCurrentAnswerState();
+    // 只有完整结束的练习才计入正确率折线；中途退出不会提交这份暂存数据。
+    commitSessionRecentAttempts();
     disposePracticeAI();
     session.finishedAt = Date.now();
     session.endedManually = manual;
@@ -832,7 +941,9 @@ export function createPracticeView(app) {
 
     const next = session.infiniteQueue.shift();
     if (!next) return null;
-    session.questions.push(next);
+    session.questions.push(
+      session.shuffleOptions ? shuffleQuestionOptions(next) : next,
+    );
     session.answers.push(null);
     session.outcomes.push(null);
     session.total = session.questions.length;
@@ -943,7 +1054,11 @@ export function createPracticeView(app) {
     });
     saveCurrentAnswerState();
 
-    recordAttempt(app.state, question, correct, { durationMs });
+    const recentAttempt = recordAttempt(app.state, question, correct, {
+      durationMs,
+      recent: false,
+    });
+    if (recentAttempt) session.recentAttempts.push(recentAttempt);
     app.persist();
 
     if (session.feedbackMode === 'afterAll') {
@@ -979,7 +1094,11 @@ export function createPracticeView(app) {
     });
     saveCurrentAnswerState();
 
-    recordAttempt(app.state, question, gradedCorrect, { durationMs });
+    const recentAttempt = recordAttempt(app.state, question, gradedCorrect, {
+      durationMs,
+      recent: false,
+    });
+    if (recentAttempt) session.recentAttempts.push(recentAttempt);
     app.persist();
 
     if (session.feedbackMode === 'afterAll') {
@@ -1009,6 +1128,7 @@ export function createPracticeView(app) {
       : session.questions.map((_, index) => index);
     const isWritten = isWrittenAnswerType(question.type);
     const isShort = question.type === 'short';
+    const optionOrderNote = session.shuffleOptions ? ' · 选项顺序已打乱' : '';
     const answerTone = showFeedback ? (session.result.correct ? 'is-correct' : 'is-wrong') : '';
 
     const optionsHTML = isShort
@@ -1064,10 +1184,10 @@ export function createPracticeView(app) {
         </div>
         <p class="answer-guide">${
           question.type === 'multiple'
-            ? '多选题 · 选择所有正确选项后提交'
+            ? `多选题 · 选择所有正确选项后提交${optionOrderNote}`
             : question.type === 'judge'
-              ? `判断题 · 选择后自动提交${deferred ? '并进入下一题' : ''}`
-              : `单选题 · 选择后自动提交${deferred ? '并进入下一题' : ''}`
+              ? `判断题 · 选择后自动提交${deferred ? '并进入下一题' : ''}${optionOrderNote}`
+              : `单选题 · 选择后自动提交${deferred ? '并进入下一题' : ''}${optionOrderNote}`
         }</p>
       `;
 
@@ -1565,6 +1685,7 @@ export function createPracticeView(app) {
           const question = currentQuestion();
           if (!question) return;
           const favorite = app.toggleFavorite(question.id);
+          question.favorite = favorite;
           answerActivityFavorite(actionElement, favorite);
         } else if (action === 'focus-ai-chat') {
           ensurePracticeAI().focus();
@@ -1687,10 +1808,50 @@ export function createPracticeView(app) {
       });
       if (!proceed) return;
     }
+    // 全部题目都已作答时不算中途退出，仍计入正确率折线。
+    if (session.records.length >= session.total) commitSessionRecentAttempts();
     flushStudyDuration();
     resetSession();
     renderCurrent();
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function installStudyClock() {
+    if (studyClockInstalled) return;
+    studyClockInstalled = true;
+    let dialogOpen = false;
+
+    ['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'].forEach((type) => {
+      document.addEventListener(type, markStudyActivity, { capture: true, passive: true });
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        if (session && screen === 'session') pauseStudyClock();
+        else clearStudyIdleTimer();
+      } else {
+        resumeStudyClock();
+      }
+    });
+
+    window.addEventListener('pagehide', () => {
+      if (session && screen === 'session') pauseStudyClock();
+    });
+
+    const observer = new MutationObserver(() => {
+      const open = Boolean(document.querySelector('dialog[open]'));
+      if (open === dialogOpen) return;
+      dialogOpen = open;
+      if (!session || screen !== 'session') return;
+      if (open) pauseStudyClock();
+      else resumeStudyClock();
+    });
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['open'],
+    });
   }
 
   function installKeyboard() {
@@ -1773,6 +1934,7 @@ export function createPracticeView(app) {
   }
 
   installKeyboard();
+  installStudyClock();
 
   function getAssistantConfig() {
     if (screen !== 'session' || !session) return null;

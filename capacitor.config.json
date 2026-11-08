@@ -1,0 +1,13 @@
+{
+  "appId": "com.shuati.helper",
+  "appName": "刷题助手",
+  "webDir": "dist-offline",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

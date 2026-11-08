@@ -1,0 +1,48 @@
+刷题助手 · 当前产物说明
+========================
+
+当前项目按平台整理，以下文件按用途区分：
+
+一、Windows 电脑端
+1. windows/release/刷题助手/
+   便携版解压目录，包含 刷题助手.exe、_internal 和说明。
+   不要只单独复制 exe。
+
+2. windows/release/刷题助手-便携版.zip
+   Windows 便携版压缩包，不包含个人题库。
+
+3. windows/release/刷题助手-含题库-便携版.zip
+   Windows 便携版 + 当前「题库保存」题库。
+   注意：其中包含题库内容，分享给他人前请确认。
+
+二、Android
+4. android/release/刷题助手-Android.apk
+   Android 平板安装包（release 签名）。
+
+5. android/release/刷题助手-Android-安装包.zip
+   Android APK + 安装说明。
+
+6. android/Android安装说明.txt
+   Android 安装和题库导入说明。
+
+三、iPad
+7. ios/release/刷题助手-iPad-工程.zip
+   给 Mac 使用的 iPad Capacitor 工程包。
+   不是 IPA，不能直接安装到 iPad；需要在 Mac + Xcode 上构建。
+
+8. ios/苹果安装手册.md
+   iPad PWA 和 iPad 独立 App 的详细安装手册。
+
+四、PWA
+9. pwa/release/刷题助手-离线版-PWA.zip
+   静态 PWA 文件，用于部署到 HTTPS 静态站点。
+   不是安装包，不能直接双击运行。
+
+10. pwa/局域网安装离线版.bat
+    局域网 HTTP 安装页 + HTTPS 应用服务。
+
+五、其他
+11. docs/平板验收清单.md
+    平板安装、导入和离线刷题验收清单。
+
+不包含：ai-config.json、API Key、offline-certs 证书私钥、Android 签名密钥。

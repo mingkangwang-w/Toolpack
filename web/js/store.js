@@ -593,6 +593,152 @@ export function repairQuestionPlacements(state) {
 
 const MAX_HISTORY_DURATION_MS = 24 * 60 * 60 * 1000;
 const MAX_ATTEMPT_DURATION_MS = 6 * 60 * 60 * 1000;
+const RECENT_ATTEMPT_LIMIT = 30;
+
+function emptyRecentAttempts() {
+  return { all: [], bySubject: {}, byBank: {} };
+}
+
+function normalizeRecentAttempt(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const at = typeof raw.at === 'string' ? raw.at : '';
+  if (!at || !Number.isFinite(Date.parse(at))) return null;
+  return {
+    at,
+    correct: Boolean(raw.correct),
+    questionId: cleanString(raw.questionId).slice(0, 200),
+  };
+}
+
+function normalizeRecentAttemptList(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(normalizeRecentAttempt)
+    .filter(Boolean)
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+    .slice(-RECENT_ATTEMPT_LIMIT);
+}
+
+function normalizeRecentAttemptMap(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const result = {};
+  for (const [key, list] of Object.entries(raw)) {
+    const id = String(key || '').trim().slice(0, 200);
+    const attempts = normalizeRecentAttemptList(list);
+    if (id && attempts.length) result[id] = attempts;
+  }
+  return result;
+}
+
+function normalizeRecentAttempts(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    all: normalizeRecentAttemptList(source.all),
+    bySubject: normalizeRecentAttemptMap(source.bySubject),
+    byBank: normalizeRecentAttemptMap(source.byBank),
+  };
+}
+
+function appendRecentAttempt(list, attempt) {
+  list.push(attempt);
+  if (list.length > RECENT_ATTEMPT_LIMIT) {
+    list.splice(0, list.length - RECENT_ATTEMPT_LIMIT);
+  }
+}
+
+function recentAttemptEntry(question, correct, subjectId, at) {
+  return {
+    at,
+    correct: Boolean(correct),
+    questionId: cleanString(question?.id).slice(0, 200),
+    subjectId: cleanString(subjectId).slice(0, 200),
+    bankId: cleanString(question?.bankId).slice(0, 200),
+  };
+}
+
+function appendRecentAttemptEntry(recent, entry) {
+  const attempt = {
+    at: entry.at,
+    correct: Boolean(entry.correct),
+    questionId: cleanString(entry.questionId).slice(0, 200),
+  };
+  appendRecentAttempt(recent.all, { ...attempt });
+  if (entry.subjectId) {
+    if (!recent.bySubject[entry.subjectId]) recent.bySubject[entry.subjectId] = [];
+    appendRecentAttempt(recent.bySubject[entry.subjectId], { ...attempt });
+  }
+  if (entry.bankId) {
+    if (!recent.byBank[entry.bankId]) recent.byBank[entry.bankId] = [];
+    appendRecentAttempt(recent.byBank[entry.bankId], { ...attempt });
+  }
+}
+
+function recordRecentAttempt(state, question, correct, subjectId, at) {
+  const recent = normalizeRecentAttempts(state.recentAttempts);
+  state.recentAttempts = recent;
+  appendRecentAttemptEntry(recent, recentAttemptEntry(question, correct, subjectId, at));
+}
+
+/**
+ * 把一次完整练习中暂存的作答统一写入正确率折线数据。
+ * 中途退出的练习不会调用这个函数，因此不会影响折线图。
+ */
+export function recordRecentAttempts(state, entries) {
+  if (!Array.isArray(entries) || !entries.length) return;
+  const recent = normalizeRecentAttempts(state.recentAttempts);
+  state.recentAttempts = recent;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    appendRecentAttemptEntry(recent, entry);
+  }
+}
+
+function mergeRecentAttemptLists(target, source) {
+  const seen = new Set();
+  const merged = [];
+  for (const attempt of [...target, ...source]) {
+    const key = `${attempt.at}|${attempt.correct ? 1 : 0}|${attempt.questionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(attempt);
+  }
+  return normalizeRecentAttemptList(merged);
+}
+
+function remapRecentAttempts(raw, maps) {
+  const recent = normalizeRecentAttempts(raw);
+  const remapMap = (source, idMap) => {
+    const result = {};
+    for (const [key, attempts] of Object.entries(source)) {
+      const mapped = idMap?.get(key) || key;
+      result[mapped] = mergeRecentAttemptLists(result[mapped] || [], attempts);
+    }
+    return result;
+  };
+  return {
+    all: recent.all,
+    bySubject: remapMap(recent.bySubject, maps?.subjectIdMap),
+    byBank: remapMap(recent.byBank, maps?.bankIdMap),
+  };
+}
+
+function mergeRecentAttempts(target, source) {
+  const current = normalizeRecentAttempts(target);
+  const incoming = normalizeRecentAttempts(source);
+  const bySubject = { ...current.bySubject };
+  for (const [key, attempts] of Object.entries(incoming.bySubject)) {
+    bySubject[key] = mergeRecentAttemptLists(bySubject[key] || [], attempts);
+  }
+  const byBank = { ...current.byBank };
+  for (const [key, attempts] of Object.entries(incoming.byBank)) {
+    byBank[key] = mergeRecentAttemptLists(byBank[key] || [], attempts);
+  }
+  return {
+    all: mergeRecentAttemptLists(current.all, incoming.all),
+    bySubject,
+    byBank,
+  };
+}
 
 function normalizeHistoryScopeBucket(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -745,35 +891,29 @@ export function historySummary(state, days = 30) {
   };
 }
 
-export function getAccuracySeries(state, { subjectId = '', bankId = '', days = 30 } = {}) {
-  const byDate = new Map((state.history || []).map((entry) => [entry.date, entry]));
-  return recentDateKeys(days).map((date) => {
-    const entry = byDate.get(date);
-    let answered = 0;
-    let correct = 0;
-    if (entry) {
-      if (bankId) {
-        const bucket = entry.byBank?.[bankId];
-        if (bucket) {
-          answered = bucket.answered;
-          correct = bucket.correct;
-        }
-      } else if (subjectId) {
-        const bucket = entry.bySubject?.[subjectId];
-        if (bucket) {
-          answered = bucket.answered;
-          correct = bucket.correct;
-        }
-      } else {
-        answered = Math.max(0, Number.parseInt(entry.answered, 10) || 0);
-        correct = Math.min(answered, Math.max(0, Number.parseInt(entry.correct, 10) || 0));
-      }
-    }
+export function getRecentAccuracySeries(
+  state,
+  { subjectId = '', bankId = '', limit = RECENT_ATTEMPT_LIMIT } = {},
+) {
+  const recent = normalizeRecentAttempts(state?.recentAttempts);
+  const source = bankId
+    ? recent.byBank[bankId] || []
+    : subjectId
+      ? recent.bySubject[subjectId] || []
+      : recent.all;
+  const attempts = source.slice(-Math.min(RECENT_ATTEMPT_LIMIT, Math.max(1, limit)));
+  let correctTotal = 0;
+  return attempts.map((attempt, index) => {
+    if (attempt.correct) correctTotal += 1;
+    const answered = index + 1;
     return {
-      date,
+      index,
+      attemptNumber: answered,
+      at: attempt.at,
+      attemptCorrect: attempt.correct,
       answered,
-      correct,
-      accuracy: answered > 0 ? Math.round((correct / answered) * 100) : null,
+      correct: correctTotal,
+      accuracy: Math.round((correctTotal / answered) * 100),
     };
   });
 }
@@ -785,6 +925,7 @@ export function defaultState() {
     banks: [],
     questions: [],
     history: [],
+    recentAttempts: emptyRecentAttempts(),
     duplicateIgnores: [],
     settings: {
       theme: null,
@@ -830,6 +971,7 @@ export function loadState() {
             .map((entry) => normalizeHistoryEntry(entry))
             .slice(-400)
         : [],
+      recentAttempts: normalizeRecentAttempts(parsed.recentAttempts),
       duplicateIgnores: normalizeDuplicateIgnores(parsed.duplicateIgnores),
       settings: {
         theme: ['light', 'dark'].includes(parsed?.settings?.theme) ? parsed.settings.theme : null,
@@ -948,9 +1090,14 @@ export function getStats(state) {
   };
 }
 
-export function recordAttempt(state, question, correct, { durationMs = 0 } = {}) {
+export function recordAttempt(
+  state,
+  question,
+  correct,
+  { durationMs = 0, recent = true } = {},
+) {
   const target = state.questions.find((item) => item.id === question.id);
-  if (!target) return;
+  if (!target) return null;
 
   target.stats.attempts += 1;
   if (correct) {
@@ -977,9 +1124,12 @@ export function recordAttempt(state, question, correct, { durationMs = 0 } = {})
   const subjectId = question.subjectId || bank?.subjectId || '';
   addHistoryScopeResult(entry.bySubject, subjectId, correct);
   addHistoryScopeResult(entry.byBank, question.bankId, correct);
+  const attempt = recentAttemptEntry(question, correct, subjectId, target.stats.lastAt);
+  if (recent) recordRecentAttempt(state, question, correct, subjectId, target.stats.lastAt);
 
   state.history.sort((a, b) => a.date.localeCompare(b.date));
   if (state.history.length > 400) state.history = state.history.slice(-400);
+  return attempt;
 }
 
 export function recordStudyDuration(state, durationMs) {
@@ -1044,6 +1194,56 @@ export function answerDisplay(question) {
   return question.answer;
 }
 
+/**
+ * 生成一份仅用于本次练习的选项乱序副本。
+ * 原题对象、题库归属和存储内容都不会被修改。
+ */
+export function shuffleQuestionOptions(question, random = Math.random) {
+  if (
+    !question ||
+    !isChoiceType(question.type) ||
+    !Array.isArray(question.options) ||
+    question.options.length < 2
+  ) {
+    return question;
+  }
+
+  const originalOptions = question.options.map((option) => ({
+    key: String(option?.key || '').toUpperCase(),
+    text: String(option?.text || ''),
+  }));
+  const validKeys = new Set(originalOptions.map((option) => option.key));
+  const answerKeys = [
+    ...new Set((String(question.answer || '').toUpperCase().match(/[A-H]/g) || [])),
+  ].filter((key) => validKeys.has(key));
+  if (!answerKeys.length) return question;
+
+  const ordered = [...originalOptions];
+  for (let index = ordered.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [ordered[index], ordered[swapIndex]] = [ordered[swapIndex], ordered[index]];
+  }
+  if (ordered.every((option, index) => option.key === originalOptions[index].key)) {
+    ordered.push(ordered.shift());
+  }
+
+  const keyMap = new Map();
+  const options = ordered.map((option, index) => {
+    const newKey = LETTERS[index];
+    keyMap.set(option.key, newKey);
+    return { key: newKey, text: option.text };
+  });
+  const answer = [...new Set(answerKeys.map((key) => keyMap.get(key)).filter(Boolean))]
+    .sort()
+    .join('');
+
+  return {
+    ...question,
+    options,
+    answer,
+  };
+}
+
 export function answerOptionTexts(question) {
   if (!isChoiceType(question.type)) return [];
   const keys = answerLetters(question.answer, question.options);
@@ -1104,7 +1304,35 @@ export function exportBackup(state) {
     banks: state.banks,
     questions: state.questions,
     history: state.history,
+    recentAttempts: state.recentAttempts || emptyRecentAttempts(),
     duplicateIgnores: state.duplicateIgnores || [],
+  };
+}
+
+/**
+ * 把选中的子题库合并导出成一个题库文件。
+ * 题目自带的练习统计会随文件保留；每日历史和折线数据不包含在题库文件中。
+ */
+export function exportLibraryPackage(state, { bankIds = [] } = {}) {
+  const selectedBankIds = new Set(
+    (Array.isArray(bankIds) ? bankIds : []).filter(Boolean),
+  );
+  const banks = state.banks.filter((bank) => selectedBankIds.has(bank.id));
+  const includedBankIds = new Set(banks.map((bank) => bank.id));
+  const includedSubjectIds = new Set(banks.map((bank) => bank.subjectId));
+  const subjects = state.subjects.filter((subject) => includedSubjectIds.has(subject.id));
+  const questions = state.questions.filter((question) => includedBankIds.has(question.bankId));
+  return {
+    app: '刷题助手',
+    kind: 'question-bank',
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    subjects,
+    banks,
+    questions,
+    history: [],
+    recentAttempts: emptyRecentAttempts(),
+    duplicateIgnores: [],
   };
 }
 
@@ -1264,6 +1492,8 @@ export function importBackup(state, payload) {
   }
   state.history.sort((a, b) => a.date.localeCompare(b.date));
   if (state.history.length > 400) state.history = state.history.slice(-400);
+  const incomingRecentAttempts = remapRecentAttempts(payload?.recentAttempts, maps);
+  state.recentAttempts = mergeRecentAttempts(state.recentAttempts, incomingRecentAttempts);
   state.duplicateIgnores = normalizeDuplicateIgnores([
     ...(state.duplicateIgnores || []),
     ...normalizeDuplicateIgnores(payload?.duplicateIgnores),

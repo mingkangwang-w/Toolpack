@@ -35,11 +35,15 @@ import {
 } from './ui.js';
 import {
   getAIConfig,
+  getShareStatus,
   loadLibraryFromDisk,
   saveAIConfig,
+  startShare,
+  stopShare,
   syncLibraryToDisk,
   testAIConnection,
 } from './api.js';
+import { isNativeApp, OFFLINE_MODE } from './runtime.js';
 
 const state = loadState();
 const LIBRARY_DIRTY_KEY = 'shuati-helper:library-dirty:v1';
@@ -164,6 +168,10 @@ function librarySnapshot() {
 
 function syncLibraryNow({ notify = true } = {}) {
   libraryRevision += 1;
+  if (OFFLINE_MODE) {
+    clearLibraryDirty();
+    return Promise.resolve({ ok: true, result: { offline: true } });
+  }
   const revision = libraryRevision;
   markLibraryDirty();
 
@@ -249,6 +257,10 @@ function applyLibraryFromDisk(disk) {
 }
 
 async function loadLibraryOnBoot() {
+  if (OFFLINE_MODE) {
+    clearLibraryDirty();
+    return;
+  }
   let disk;
   try {
     disk = await loadLibraryFromDisk();
@@ -328,6 +340,11 @@ function renderView(name, { preserveScroll = false, ...viewOptions } = {}) {
 
 async function navigate(name, options = {}) {
   if (!views?.[name]) return false;
+
+  if (OFFLINE_MODE && name === 'import') {
+    toast('离线版不支持图片识别；请在电脑端导出题库后，在「我的题库 → 导入题库」中选择 JSON 文件。', 'info', 5200);
+    return false;
+  }
 
   if (
     currentViewName === 'practice' &&
@@ -645,6 +662,9 @@ const app = {
     };
   },
   getLibraryInfo() {
+    if (OFFLINE_MODE) {
+      return { root: '平板本地存储', lastSyncAt: '', dirty: false };
+    }
     return {
       root: libraryRootLabel,
       lastSyncAt: lastLibrarySyncAt,
@@ -655,6 +675,7 @@ const app = {
     return syncLibraryNow(options);
   },
   async reloadLibraryFromDisk() {
+    if (OFFLINE_MODE) return false;
     if (currentViewName === 'practice' && views?.practice?.hasActiveSession()) {
       toast('先结束当前练习，再从磁盘重新读取题库。', 'info');
       return false;
@@ -684,6 +705,11 @@ const app = {
     }
   },
   async clearLibraryFiles() {
+    if (OFFLINE_MODE) {
+      libraryRevision += 1;
+      clearLibraryDirty();
+      return { ok: true, result: { offline: true } };
+    }
     await librarySyncChain;
     libraryRevision += 1;
     try {
@@ -798,6 +824,12 @@ const app = {
     return openContextAIAssistant();
   },
   openDataDialog,
+  openShareLibraryDialog() {
+    return openShareLibraryDialog();
+  },
+  openOfflineSetupGuide() {
+    return openOfflineSetupGuide();
+  },
 };
 
 views = {
@@ -850,6 +882,10 @@ function buildDefaultAssistantConfig() {
 }
 
 async function openContextAIAssistant() {
+  if (OFFLINE_MODE) {
+    toast('离线版不提供 AI 助手；刷题和统计不依赖网络。', 'info', 4200);
+    return null;
+  }
   let config = null;
   const activeView = currentViewName ? views?.[currentViewName] : null;
   if (activeView && typeof activeView.getAssistantConfig === 'function') {
@@ -1101,6 +1137,10 @@ async function openQuestionEditor(question = null, options = {}) {
 }
 
 async function openAISettings({ onSaved = null } = {}) {
+  if (OFFLINE_MODE) {
+    toast('离线版不提供 AI 设置；刷题和统计不依赖网络。', 'info', 4200);
+    return null;
+  }
   let config;
   try {
     config = await getAIConfig();
@@ -1382,6 +1422,497 @@ async function openAISettings({ onSaved = null } = {}) {
   return control;
 }
 
+function openOfflineSetupGuide() {
+  if (!OFFLINE_MODE) {
+    toast('配置向导仅在平板离线版中可用。', 'info');
+    return null;
+  }
+
+  let step = state.questions.length ? 3 : 1;
+  let importSummary = null;
+  let busy = false;
+
+  const progressHTML = () => {
+    const labels = [
+      [1, '准备文件'],
+      [2, '导入平板'],
+      [3, '开始刷题'],
+    ];
+    return `
+      <ol class="offline-guide-progress" aria-label="配置进度">
+        ${labels
+          .map(
+            ([number, label]) => `
+              <li class="${step === number ? 'is-active' : ''} ${step > number ? 'is-done' : ''}">
+                <span>${step > number ? icon('check', 12) : number}</span>
+                <b>${label}</b>
+              </li>
+            `,
+          )
+          .join('')}
+      </ol>
+    `;
+  };
+
+  const stepContentHTML = () => {
+    if (step === 1) {
+      return `
+        <section class="offline-guide-step">
+          <p class="eyebrow">STEP 01</p>
+          <h3>先在电脑端导出一个题库文件</h3>
+          <p class="offline-guide-lead">题库文件是一个 JSON 文件，里面包含题目、答案、解析和练习统计。</p>
+          <ol class="offline-guide-tips">
+            <li><b>打开电脑端刷题助手</b><span>进入「我的题库」。</span></li>
+            <li><b>点击「导出题库」</b><span>勾选需要的科目或子题库。</span></li>
+            <li><b>导出为一个文件</b><span>把下载的 .json 文件放到平板能拿到的地方。</span></li>
+          </ol>
+          <div class="offline-guide-actions">
+            <button type="button" class="btn primary" data-guide-next="2">
+              下一步：导入到平板 ${icon('arrow-right', 15)}
+            </button>
+            ${
+              state.questions.length
+                ? '<button type="button" class="btn ghost" data-guide-next="3">已有题库，直接开始</button>'
+                : ''
+            }
+          </div>
+        </section>
+      `;
+    }
+
+    if (step === 2) {
+      let savedLanHost = '';
+      try {
+        savedLanHost = window.localStorage.getItem('shuati-helper:lan-host:v1') || '';
+      } catch {
+        savedLanHost = '';
+      }
+      return `
+        <section class="offline-guide-step">
+          <p class="eyebrow">STEP 02</p>
+          <h3>把题库导入平板</h3>
+          <p class="offline-guide-lead">可以从本地文件导入，也可以在同一 Wi-Fi 下直接从电脑导入。</p>
+          <div class="offline-guide-import">
+            <span class="offline-guide-import-icon">${icon('upload', 24)}</span>
+            <b>选择题库文件</b>
+            <p>支持「导出题库」生成的 .json 文件，也支持完整备份。</p>
+            <button type="button" class="btn primary" data-guide-pick>
+              ${icon('upload', 15)} 选择 JSON 文件
+            </button>
+            <input type="file" hidden accept=".json,application/json" data-guide-file>
+            <p class="offline-guide-status" data-guide-status role="status"></p>
+          </div>
+          ${
+            isNativeApp()
+              ? `<div class="offline-guide-divider"><span>或从同一 Wi-Fi 的电脑导入</span></div>
+                 <div class="offline-guide-lan">
+                   <span class="offline-guide-lan-icon">${icon('layers', 21)}</span>
+                   <b>连接电脑题库</b>
+                   <p>在电脑打开「我的题库 → 分享给平板 → 开始分享」，输入页面显示的地址和导入码。只有导入时需要网络。</p>
+                   <div class="offline-guide-lan-fields">
+                     <label>
+                       <span>电脑地址</span>
+                       <input type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
+                         placeholder="192.168.1.5:8767" value="${escapeHTML(savedLanHost)}" data-guide-lan-host>
+                     </label>
+                     <label>
+                       <span>导入码</span>
+                       <input type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false"
+                         placeholder="6 位数字" maxlength="12" data-guide-lan-code>
+                     </label>
+                   </div>
+                   <button type="button" class="btn subtle" data-guide-lan-import>
+                     ${icon('download', 15)} 从电脑导入
+                   </button>
+                   <p class="offline-guide-status" data-guide-lan-status role="status"></p>
+                 </div>`
+              : ''
+          }
+          ${
+            state.questions.length
+              ? `<p class="offline-guide-existing">当前已有 ${state.questions.length} 道题，继续导入会合并到这些题目中。</p>`
+              : ''
+          }
+          <div class="offline-guide-actions">
+            <button type="button" class="btn subtle" data-guide-next="1">${icon('arrow-left', 15)} 上一步</button>
+            ${
+              state.questions.length
+                ? '<button type="button" class="btn ghost" data-guide-next="3">跳过导入，使用现有题库</button>'
+                : ''
+            }
+          </div>
+        </section>
+      `;
+    }
+
+    const stats = getStats(state);
+    const summaryText = importSummary
+      ? `本次新增 ${importSummary.added} 道题${
+          importSummary.skipped ? `，合并 ${importSummary.skipped} 道重复题` : ''
+        }。`
+      : '题库已经保存在这台平板上，可以开始刷题。';
+    return `
+      <section class="offline-guide-step">
+        <p class="eyebrow">STEP 03</p>
+        <h3>题库已就绪</h3>
+        <p class="offline-guide-lead">${summaryText}</p>
+        <div class="offline-guide-summary">
+          <div><strong>${state.questions.length}</strong><span>道题</span></div>
+          <div><strong>${state.subjects.length}</strong><span>个科目</span></div>
+          <div><strong>${state.banks.length}</strong><span>个子题库</span></div>
+          <div><strong>${stats.answerable}</strong><span>道可练</span></div>
+        </div>
+        <p class="offline-guide-note">${icon('info', 14)} 之后的练习、收藏和统计都会保存在这台平板上，不需要电脑和网络。</p>
+        <div class="offline-guide-actions">
+          <button type="button" class="btn primary" data-guide-practice>
+            ${icon('play', 15)} 开始刷题
+          </button>
+          <button type="button" class="btn subtle" data-guide-library>查看题库</button>
+          <button type="button" class="btn ghost" data-guide-next="2">继续导入</button>
+        </div>
+      </section>
+    `;
+  };
+
+  const control = openDialog({
+    title: '配置离线题库',
+    eyebrow: 'OFFLINE SETUP',
+    description: '跟着三步操作，把电脑端的题库带到平板。',
+    size: 'md',
+    bodyClass: 'offline-guide-body',
+    content: '<div class="offline-guide" data-guide-host></div>',
+    footer: '<button type="button" class="btn subtle" data-guide-close>稍后再说</button>',
+    onMount: ({ dialog, close }) => {
+      const host = dialog.querySelector('[data-guide-host]');
+
+      const completeImport = async (payload) => {
+        const result = importBackup(state, payload);
+        importSummary = result;
+        if (!persist()) throw new Error('本地存储空间不足，无法保存题库。');
+        await syncLibraryNow({ notify: false });
+        busy = false;
+        step = 3;
+        if (currentViewName) renderView(currentViewName, { preserveScroll: true });
+        render();
+        toast(
+          `导入完成：新增 ${result.added} 道题${
+            result.skipped ? `，合并 ${result.skipped} 道重复题` : ''
+          }。`,
+          result.added ? 'success' : 'info',
+          4200,
+        );
+      };
+
+      const render = () => {
+        host.innerHTML = `${progressHTML()}${stepContentHTML()}`;
+        host.querySelectorAll('[data-guide-next]').forEach((button) => {
+          button.addEventListener('click', () => {
+            if (busy) return;
+            step = Number(button.dataset.guideNext);
+            render();
+          });
+        });
+        const fileInput = host.querySelector('[data-guide-file]');
+        host.querySelector('[data-guide-pick]')?.addEventListener('click', () => {
+          if (!busy) fileInput?.click();
+        });
+        fileInput?.addEventListener('change', async () => {
+          const file = fileInput.files?.[0];
+          fileInput.value = '';
+          if (!file || busy) return;
+          if (file.size > 20 * 1024 * 1024) {
+            const status = host.querySelector('[data-guide-status]');
+            if (status) status.textContent = '题库文件不能超过 20MB。';
+            return;
+          }
+          busy = true;
+          const status = host.querySelector('[data-guide-status]');
+          const pickButton = host.querySelector('[data-guide-pick]');
+          if (pickButton) pickButton.disabled = true;
+          if (status) status.textContent = '正在导入题库…';
+          try {
+            const payload = JSON.parse(await file.text());
+            await completeImport(payload);
+          } catch (error) {
+            busy = false;
+            if (pickButton) pickButton.disabled = false;
+            if (status) status.textContent = error.message || '导入失败，请检查文件格式。';
+            toast(`导入失败：${error.message || '文件格式不正确'}`, 'error', 4200);
+          }
+        });
+
+        const lanButton = host.querySelector('[data-guide-lan-import]');
+        lanButton?.addEventListener('click', async () => {
+          if (busy) return;
+          const hostInput = host.querySelector('[data-guide-lan-host]');
+          const codeInput = host.querySelector('[data-guide-lan-code]');
+          const status = host.querySelector('[data-guide-lan-status]');
+          const rawHost = hostInput?.value.trim() || '';
+          const code = codeInput?.value.trim() || '';
+          if (!rawHost) {
+            if (status) status.textContent = '请输入电脑窗口显示的地址。';
+            hostInput?.focus();
+            return;
+          }
+          if (!code) {
+            if (status) status.textContent = '请输入电脑窗口显示的导入码。';
+            codeInput?.focus();
+            return;
+          }
+
+          let endpoint;
+          try {
+            const url = new URL(/^https?:\/\//i.test(rawHost) ? rawHost : `http://${rawHost}`);
+            url.pathname = '/api/library';
+            url.search = `?code=${encodeURIComponent(code)}`;
+            endpoint = url.toString();
+            try {
+              window.localStorage.setItem('shuati-helper:lan-host:v1', url.host);
+            } catch {
+              // 本地存储不可用时不影响导入。
+            }
+          } catch {
+            if (status) status.textContent = '电脑地址格式不正确，例如 192.168.1.5:8767。';
+            return;
+          }
+
+          busy = true;
+          lanButton.disabled = true;
+          if (status) status.textContent = '正在连接电脑并读取题库…';
+          const controller = new AbortController();
+          const timer = window.setTimeout(() => controller.abort(), 20_000);
+          try {
+            const response = await fetch(endpoint, {
+              headers: { Accept: 'application/json' },
+              signal: controller.signal,
+            });
+            if (!response.ok) {
+              throw new Error(`电脑返回 HTTP ${response.status}，请检查地址和导入码。`);
+            }
+            const payload = await response.json();
+            await completeImport(payload);
+          } catch (error) {
+            busy = false;
+            lanButton.disabled = false;
+            if (status) {
+              status.textContent =
+                error.name === 'AbortError'
+                  ? '连接超时，请确认电脑地址、导入码和同一 Wi-Fi。'
+                  : error.message || '从电脑导入失败。';
+            }
+            toast(`从电脑导入失败：${error.message || '请检查连接信息。'}`, 'error', 4800);
+          } finally {
+            window.clearTimeout(timer);
+          }
+        });
+
+        host.querySelector('[data-guide-practice]')?.addEventListener('click', () => {
+          close();
+          app.navigate('practice');
+        });
+        host.querySelector('[data-guide-library]')?.addEventListener('click', () => {
+          close();
+          app.navigate('library');
+        });
+      };
+
+      dialog.querySelector('[data-guide-close]')?.addEventListener('click', close);
+      render();
+    },
+  });
+
+  return control;
+}
+
+function formatShareRemaining(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(total / 60);
+  const rest = String(total % 60).padStart(2, '0');
+  return `${minutes}:${rest}`;
+}
+
+function openShareLibraryDialog() {
+  if (OFFLINE_MODE) {
+    toast('当前是平板离线版，请在电脑端使用题库分享功能。', 'info');
+    return null;
+  }
+
+  let busy = false;
+  let timer = null;
+
+  const copyText = async (text, label) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`${label}已复制。`, 'success', 2200);
+    } catch {
+      toast(`复制失败，请手动记下：${text}`, 'info', 5200);
+    }
+  };
+
+  const activeHTML = (status) => {
+    const addresses = Array.isArray(status.addresses) ? status.addresses : [];
+    return `
+      <div class="share-status-card">
+        <div class="share-status-line">
+          <span class="share-live"><i></i> 正在分享</span>
+          <span class="share-remaining">剩余 ${formatShareRemaining(status.remainingSeconds)}</span>
+        </div>
+        <p>保持电脑上的刷题助手窗口打开；平板导入完成后可以停止分享。</p>
+      </div>
+      <div class="share-section">
+        <span class="share-label">平板地址</span>
+        ${
+          addresses.length
+            ? `<div class="share-address-list">${addresses
+                .map(
+                  (address) => `
+                    <button type="button" class="share-address" data-share-copy="${escapeHTML(`${address}:${status.port}`)}">
+                      <span>${escapeHTML(address)}:${status.port}</span>
+                      ${icon('copy', 14)}
+                    </button>
+                  `,
+                )
+                .join('')}</div>
+               <p class="share-hint">如果第一个地址连不上，请尝试下面列出的其他地址。</p>`
+            : '<p class="share-warning">没有检测到局域网地址，请确认电脑已经连接 Wi-Fi 或网线。</p>'
+        }
+      </div>
+      <div class="share-code-card">
+        <div>
+          <span class="share-label">导入码</span>
+          <strong>${escapeHTML(status.code)}</strong>
+        </div>
+        <button type="button" class="btn subtle" data-share-copy-code="${escapeHTML(status.code)}">
+          ${icon('copy', 15)} 复制导入码
+        </button>
+      </div>
+      <ol class="share-steps">
+        <li>平板和电脑连接同一个 Wi-Fi。</li>
+        <li>平板打开 App →「我的题库 → 配置向导 → 从电脑导入」。</li>
+        <li>输入上面的地址和导入码，点击「从电脑导入」。</li>
+      </ol>
+      <div class="share-actions">
+        <button type="button" class="btn subtle" data-share-refresh>${icon('refresh', 15)} 刷新状态</button>
+        <button type="button" class="btn danger-ghost" data-share-stop>停止分享</button>
+      </div>
+      <p class="share-note">${icon('info', 14)} 分享会在 ${Math.round((status.ttlSeconds || 600) / 60)} 分钟后自动停止；关闭本窗口不会停止分享。分享内容只读，不包含 AI Key。局域网分享只同步题库内容，不包含电脑上的练习统计；需要统计时请用「导出题库」文件导入。</p>
+    `;
+  };
+
+  const inactiveHTML = () => `
+    <div class="share-empty">
+      <span class="share-empty-icon">${icon('tablet', 30)}</span>
+      <h3>把题库发送到平板</h3>
+      <p>电脑和安装了刷题助手 App 的平板连接同一个 Wi-Fi。开始分享后，在平板 App 的「配置题库 → 从电脑导入」中输入地址和导入码。</p>
+      <button type="button" class="btn primary" data-share-start>
+        ${icon('tablet', 16)} 开始分享
+      </button>
+      <p class="share-note">${icon('info', 14)} 只读分享当前题库，不会上传到互联网；关闭刷题助手会自动停止。如果平板连不上，请允许 Windows 防火墙的「专用网络」访问。</p>
+    </div>
+  `;
+
+  const control = openDialog({
+    title: '分享给平板',
+    eyebrow: 'LAN SHARE',
+    description: '在同一局域网内把当前题库只读分享给平板 App，导入完成后可以停止。',
+    size: 'md',
+    bodyClass: 'share-library-body',
+    content: '<div class="share-library" data-share-host><div class="share-loading">正在读取分享状态…</div></div>',
+    footer: '<button type="button" class="btn subtle" data-share-close>关闭</button>',
+    onMount: ({ dialog, close }) => {
+      const host = dialog.querySelector('[data-share-host]');
+
+      const bind = (status) => {
+        host.querySelectorAll('[data-share-copy]').forEach((button) => {
+          button.addEventListener('click', () => {
+            copyText(button.dataset.shareCopy || '', '地址');
+          });
+        });
+        host.querySelector('[data-share-copy-code]')?.addEventListener('click', (event) => {
+          copyText(event.currentTarget.dataset.shareCopyCode || '', '导入码');
+        });
+        host.querySelector('[data-share-start]')?.addEventListener('click', async () => {
+          if (busy) return;
+          busy = true;
+          const button = host.querySelector('[data-share-start]');
+          if (button) {
+            button.disabled = true;
+            button.textContent = '正在启动分享…';
+          }
+          try {
+            const result = await startShare();
+            busy = false;
+            render(result);
+            toast('题库分享已开始。', 'success', 3000);
+          } catch (error) {
+            busy = false;
+            toast(`无法开始分享：${error.message || '未知错误'}`, 'error', 5200);
+            render(status);
+          }
+        });
+        host.querySelector('[data-share-stop]')?.addEventListener('click', async () => {
+          if (busy) return;
+          busy = true;
+          const button = host.querySelector('[data-share-stop]');
+          if (button) {
+            button.disabled = true;
+            button.textContent = '正在停止…';
+          }
+          try {
+            const result = await stopShare();
+            busy = false;
+            render(result);
+            toast('题库分享已停止。', 'info', 3000);
+          } catch (error) {
+            busy = false;
+            toast(`停止分享失败：${error.message || '未知错误'}`, 'error', 4200);
+            render(status);
+          }
+        });
+        host.querySelector('[data-share-refresh]')?.addEventListener('click', () => refresh());
+      };
+
+      const render = (status) => {
+        host.innerHTML = status?.active ? activeHTML(status) : inactiveHTML();
+        bind(status);
+      };
+
+      const refresh = async (silent = false) => {
+        try {
+          const status = await getShareStatus();
+          render(status);
+        } catch (error) {
+          if (silent) return;
+          host.innerHTML = `
+            <div class="share-empty">
+              <span class="share-empty-icon">${icon('alert', 28)}</span>
+              <h3>无法读取分享状态</h3>
+              <p>${escapeHTML(error.message || '请确认电脑上的刷题助手仍在运行。')}</p>
+            </div>
+          `;
+        }
+      };
+
+      dialog.querySelector('[data-share-close]')?.addEventListener('click', close);
+      dialog.addEventListener('close', () => {
+        if (timer) window.clearInterval(timer);
+        timer = null;
+      });
+      refresh();
+      timer = window.setInterval(() => {
+        if (!dialog.isConnected) {
+          window.clearInterval(timer);
+          timer = null;
+          return;
+        }
+        if (!busy) refresh(true);
+      }, 5000);
+    },
+  });
+
+  return control;
+}
+
 function openDataDialog() {
   if (currentViewName === 'practice' && views.practice.hasActiveSession()) {
     toast('先结束当前练习，再管理题库数据。', 'info');
@@ -1401,9 +1932,11 @@ function openDataDialog() {
   const libraryInfo = app.getLibraryInfo();
 
   const control = openDialog({
-    title: '题库文件与备份',
+    title: OFFLINE_MODE ? '离线数据备份' : '题库文件与备份',
     eyebrow: 'LIBRARY FILES',
-    description: '题目和答案会保存为项目「题库保存」文件夹中的 Markdown 文件；导出的 JSON 是额外备份。',
+    description: OFFLINE_MODE
+      ? '题库和练习记录保存在当前平板浏览器中；导出的 JSON 可用于备份或带回电脑。'
+      : '题目和答案会保存为「题库保存」文件夹中的 Markdown 文件；这里导出的是包含全部数据和历史的完整备份。',
     size: 'md',
     content: `
       <div class="data-manager">
@@ -1413,50 +1946,66 @@ function openDataDialog() {
             <h3>${state.subjects.length} 个科目 · ${state.banks.length} 个子题库 · ${state.questions.length} 道题</h3>
             <p>已练习 ${attempts} 次 · 本地数据约 ${approxSize} · 图片不会被保存</p>
           </div>
-          <span class="local-pill"><i></i> 本机</span>
+          <span class="local-pill"><i></i> ${OFFLINE_MODE ? '离线' : '本机'}</span>
         </div>
 
         <div class="data-card-grid">
           <section class="data-card">
             <span class="data-card-icon">${icon('download', 20)}</span>
             <h3>导出备份</h3>
-            <p>把全部科目、子题库、题目、答案和练习记录保存成一个 JSON 文件。</p>
+            <p>把全部科目、子题库、题目、答案和练习记录保存成一个完整备份文件。只导出部分题库请用「我的题库 → 导出题库」。</p>
             <button type="button" class="btn subtle full-width" data-data-export>${icon('download', 15)} 导出 JSON</button>
           </section>
           <section class="data-card">
             <span class="data-card-icon">${icon('upload', 20)}</span>
             <h3>导入备份</h3>
-            <p>从备份文件恢复题库；内容相同的题目会合并练习统计，不会重复添加。</p>
+            <p>${
+              OFFLINE_MODE
+                ? '从电脑端的完整备份恢复题库和练习历史；内容相同的题目会合并练习统计，不会重复添加。'
+                : '从完整备份恢复全部题库和历史；内容相同的题目会合并练习统计，不会重复添加。单个题库文件请在「我的题库 → 导入题库」中选择。'
+            }</p>
             <button type="button" class="btn subtle full-width" data-data-import>${icon('upload', 15)} 选择文件</button>
             <input type="file" hidden accept=".json,application/json" data-data-file>
           </section>
         </div>
 
-        <section class="data-disk-card">
-          <span class="data-card-icon">${icon('layers', 20)}</span>
-          <div class="data-disk-copy">
-            <h3>Markdown 题库</h3>
-            <code>${escapeHTML(libraryInfo.root)}/科目名/子题库名.md</code>
-            <p>${
-              libraryInfo.dirty
-                ? '有改动尚未写入磁盘，请检查题库文件夹权限或稍后重试。'
-                : libraryInfo.lastSyncAt
-                  ? `上次写入：${relativeDate(libraryInfo.lastSyncAt)}`
-                  : '启动后会自动读取这里的题库文件。'
-            }</p>
-          </div>
-          <button type="button" class="btn subtle" data-data-reload-disk>${icon('refresh', 15)} 从磁盘刷新</button>
-        </section>
+        ${
+          OFFLINE_MODE
+            ? ''
+            : `<section class="data-disk-card">
+                <span class="data-card-icon">${icon('layers', 20)}</span>
+                <div class="data-disk-copy">
+                  <h3>Markdown 题库</h3>
+                  <code>${escapeHTML(libraryInfo.root)}/科目名/子题库名.md</code>
+                  <p>${
+                    libraryInfo.dirty
+                      ? '有改动尚未写入磁盘，请检查题库文件夹权限或稍后重试。'
+                      : libraryInfo.lastSyncAt
+                        ? `上次写入：${relativeDate(libraryInfo.lastSyncAt)}`
+                        : '启动后会自动读取这里的题库文件。'
+                  }</p>
+                </div>
+                <button type="button" class="btn subtle" data-data-reload-disk>${icon('refresh', 15)} 从磁盘刷新</button>
+              </section>`
+        }
 
         <div class="data-hint">
           ${icon('info', 16)}
-          <p>每次启动会直接读取 Markdown 题库，做题时不会调用 AI。只有导入和识别新题时才需要 AI。数据不会上传到云端。</p>
+          <p>${
+            OFFLINE_MODE
+              ? '离线版不连接电脑，也不会调用 AI。题目和统计只保存在这台平板上，建议定期导出备份。'
+              : '每次启动会直接读取 Markdown 题库，做题时不会调用 AI。只有导入和识别新题时才需要 AI。数据不会上传到云端。'
+          }</p>
         </div>
 
         <div class="data-danger">
           <div>
             <h3>清空全部数据</h3>
-            <p>删除所有程序管理的题库 Markdown 与练习记录；同文件夹里的图片等非管理文件会保留。建议先导出备份。</p>
+            <p>${
+              OFFLINE_MODE
+                ? '删除这台平板上的题库、练习记录和统计。建议先导出备份。'
+                : '删除所有程序管理的题库 Markdown 与练习记录；同文件夹里的图片等非管理文件会保留。建议先导出备份。'
+            }</p>
           </div>
           <button type="button" class="btn danger-ghost" data-data-clear>清空数据</button>
         </div>
@@ -1561,6 +2110,7 @@ function openDataDialog() {
 
         state.questions = [];
         state.history = [];
+        state.recentAttempts = { all: [], bySubject: {}, byBank: {} };
         state.duplicateIgnores = [];
         state.subjects = [];
         state.banks = [];
@@ -1568,7 +2118,13 @@ function openDataDialog() {
         persist();
         close();
         renderView(currentViewName, { preserveScroll: true });
-        toast('浏览器与 Markdown 题库已清空；图片等非题库文件会保留。', 'info', 4200);
+        toast(
+          OFFLINE_MODE
+            ? '平板上的本地题库和练习记录已清空。'
+            : '浏览器与 Markdown 题库已清空；图片等非题库文件会保留。',
+          'info',
+          4200,
+        );
       });
     },
   });
@@ -1592,6 +2148,10 @@ function bindShellEvents() {
 
   document.querySelectorAll('[data-global-action]').forEach((button) => {
     button.addEventListener('click', () => {
+      if (OFFLINE_MODE && ['assistant', 'ai'].includes(button.dataset.globalAction)) {
+        toast('离线版不提供 AI 功能；刷题和统计不依赖网络。', 'info', 4200);
+        return;
+      }
       if (button.dataset.globalAction === 'assistant') openContextAIAssistant();
       else if (button.dataset.globalAction === 'ai') openAISettings();
       else if (button.dataset.globalAction === 'data') openDataDialog();
@@ -1600,6 +2160,7 @@ function bindShellEvents() {
   });
 
   document.addEventListener('paste', async (event) => {
+    if (OFFLINE_MODE) return;
     if (document.querySelector('dialog[open]')) return;
     const items = [...(event.clipboardData?.items || [])];
     const files = items
@@ -1627,7 +2188,7 @@ async function boot() {
   main.innerHTML = `
     <div class="boot-loading">
       <span class="mini-spinner" aria-hidden="true"></span>
-      <p>正在读取本地 Markdown 题库…</p>
+      <p>${OFFLINE_MODE ? '正在打开离线题库…' : '正在读取本地 Markdown 题库…'}</p>
     </div>
   `;
   try {
