@@ -1,6 +1,9 @@
 import {
   banksForSubject,
-  getRecentAccuracySeries,
+  getCompletedAccuracySummary,
+  getDailyStudyDurations,
+  getLatestCompletedSession,
+  getSessionAccuracySeries,
   getStats,
   historySummary,
   isQuestionAnswerable,
@@ -110,6 +113,54 @@ function trendScopeLabel(state, selection) {
   return '全部科目';
 }
 
+const SESSION_SCOPE_LABELS = {
+  all: '全部题目',
+  unmastered: '未掌握',
+  wrong: '错题复习',
+  favorites: '收藏题目',
+  custom: '指定题目',
+};
+
+function sessionTargetLabel(state, session) {
+  const bank = session.bankId
+    ? state.banks.find((item) => item.id === session.bankId)
+    : null;
+  const subject = state.subjects.find(
+    (item) => item.id === (bank?.subjectId || session.subjectId),
+  );
+  if (bank) return subject ? `${subject.name} / ${bank.name}` : bank.name;
+  if (subject) return `${subject.name} · 科目总题库`;
+  return '全部科目';
+}
+
+function completedSessionLabel(state, session) {
+  const scope = SESSION_SCOPE_LABELS[session.scope] || '完整练习';
+  return `${sessionTargetLabel(state, session)} · ${scope}`;
+}
+
+function defaultTrendSelection(state) {
+  const latest = getLatestCompletedSession(state);
+  const latestBank = latest?.bankId
+    ? state.banks.find((bank) => bank.id === latest.bankId)
+    : null;
+  if (latestBank) return { subjectId: latestBank.subjectId, bankId: latestBank.id };
+  const latestSubject = latest?.subjectId
+    ? state.subjects.find((subject) => subject.id === latest.subjectId)
+    : null;
+  if (latestSubject) return { subjectId: latestSubject.id, bankId: '' };
+  const remembered = state.banks.find((bank) => bank.id === state.settings.lastBankId);
+  return remembered
+    ? { subjectId: remembered.subjectId, bankId: remembered.id }
+    : { subjectId: '', bankId: '' };
+}
+
+function trendAccuracySummary(state, selection) {
+  return getCompletedAccuracySummary(state, {
+    subjectId: selection.subjectId,
+    bankId: selection.bankId,
+  });
+}
+
 function trendSubjectOptionsHTML(state, selection) {
   return `
     <option value="">全部科目</option>
@@ -169,15 +220,6 @@ function trendToolbarHTML(state, selection) {
   `;
 }
 
-function trendSeriesSummary(series) {
-  const latest = series[series.length - 1];
-  return {
-    answered: series.length,
-    correct: latest?.correct || 0,
-    accuracy: latest?.accuracy ?? null,
-  };
-}
-
 function accuracyChartSVG(series, scopeLabel) {
   const width = 720;
   const height = 224;
@@ -226,13 +268,14 @@ function accuracyChartSVG(series, scopeLabel) {
       const point = points[index];
       if (!point) return '';
       const anchor = index === 0 ? 'start' : index === count - 1 ? 'end' : 'middle';
-      return `<text class="trend-axis-label" x="${point.x}" y="${height - 8}" text-anchor="${anchor}">第 ${point.attemptNumber} 次</text>`;
+      return `<text class="trend-axis-label" x="${point.x}" y="${height - 8}" text-anchor="${anchor}">第 ${point.sessionNumber} 次</text>`;
     })
     .join('');
 
   const circles = valid
     .map((point) => {
-      const label = `第 ${point.attemptNumber} 次，本次${point.attemptCorrect ? '答对' : '答错'}，累计正确率 ${point.accuracy}%`;
+      const scope = SESSION_SCOPE_LABELS[point.scope] || '完整练习';
+      const label = `第 ${point.sessionNumber} 次完整练习，${point.correct}/${point.answered} 题正确，正确率 ${point.accuracy}%，范围：${scope}`;
       return `
         <circle class="trend-point" cx="${point.x}" cy="${point.y}" r="4"
           data-trend-index="${point.index}" tabindex="0" role="img"
@@ -251,10 +294,10 @@ function accuracyChartSVG(series, scopeLabel) {
   const hoverData = encodeURIComponent(
     JSON.stringify(
       series.map(
-        ({ at, attemptNumber, attemptCorrect, answered, correct, accuracy }) => ({
+        ({ at, sessionNumber, scope, answered, correct, accuracy }) => ({
           at,
-          attemptNumber,
-          attemptCorrect,
+          sessionNumber,
+          scope,
           answered,
           correct,
           accuracy,
@@ -268,8 +311,8 @@ function accuracyChartSVG(series, scopeLabel) {
       data-chart-left="${left}" data-chart-top="${top}"
       data-chart-width="${plotWidth}" data-chart-height="${plotHeight}"
       data-chart-count="${count}" data-series="${hoverData}"
-      role="img" aria-label="${escapeHTML(scopeLabel)}最近 30 次正确率折线图">
-      <title>${escapeHTML(scopeLabel)}最近 30 次正确率折线图</title>
+      role="img" aria-label="${escapeHTML(scopeLabel)}最近 30 次完整练习正确率折线图">
+      <title>${escapeHTML(scopeLabel)}最近 30 次完整练习正确率折线图</title>
       ${gridLines}
       ${xLabels}
       <line class="trend-crosshair" data-trend-crosshair
@@ -289,16 +332,16 @@ function trendDataTableHTML(series, scopeLabel) {
     <details class="trend-data-table">
       <summary>查看数据表</summary>
       <div class="trend-table-scroll">
-        <table aria-label="${escapeHTML(scopeLabel)}最近 30 次正确率数据">
-          <thead><tr><th>次数</th><th>时间</th><th>本次</th><th>累计</th><th>正确率</th></tr></thead>
+        <table aria-label="${escapeHTML(scopeLabel)}最近 30 次完整练习正确率数据">
+          <thead><tr><th>次数</th><th>完成时间</th><th>范围</th><th>答对/题数</th><th>正确率</th></tr></thead>
           <tbody>
             ${series
               .map(
                 (point) => `
                 <tr>
-                  <td>第 ${point.attemptNumber} 次</td>
+                  <td>第 ${point.sessionNumber} 次</td>
                   <td>${chartAttemptTime(point.at)}</td>
-                  <td>${point.attemptCorrect ? '答对' : '答错'}</td>
+                  <td>${escapeHTML(SESSION_SCOPE_LABELS[point.scope] || '完整练习')}</td>
                   <td>${point.correct}/${point.answered}</td>
                   <td>${point.accuracy}%</td>
                 </tr>
@@ -313,24 +356,33 @@ function trendDataTableHTML(series, scopeLabel) {
 }
 
 function trendChartBodyHTML(state, selection) {
-  const series = getRecentAccuracySeries(state, {
+  const series = getSessionAccuracySeries(state, {
     subjectId: selection.subjectId,
     bankId: selection.bankId,
     limit: 30,
   });
-  const summary = trendSeriesSummary(series);
+  const summary = trendAccuracySummary(state, selection);
   const scopeLabel = trendScopeLabel(state, selection);
   const hasData = series.length > 0;
+  const subjectTotal = Boolean(selection.subjectId && !selection.bankId);
   return `
     <div class="trend-chart-heading">
       <div>
-        <span class="eyebrow">ACCURACY · 最近 30 次</span>
-        <h3>最近 30 次正确率</h3>
-        <p>${escapeHTML(scopeLabel)} · 仅统计完整结束的练习，中途退出不计入</p>
+        <span class="eyebrow">ACCURACY · 完整练习</span>
+        <h3>完整练习正确率</h3>
+        <p>${escapeHTML(scopeLabel)} · 按整组记录整体正确率；${
+          subjectTotal ? '只统计科目总题库的完整练习，不含子题库成绩；' : ''
+        }错题复习、收藏练习和中途退出不计入</p>
       </div>
       <div class="trend-kpi">
         <strong>${summary.accuracy === null ? '—' : `${summary.accuracy}%`}</strong>
-        <span>最近 ${summary.answered} 次作答 · ${summary.correct} 次正确</span>
+        <span>${
+          summary.sessions
+            ? `累计 ${summary.sessions} 次完整练习 · ${summary.correct}/${summary.answered} 题正确`
+            : subjectTotal
+              ? '还没有科目总题库的完整练习'
+              : '当前范围还没有完整练习'
+        }</span>
       </div>
     </div>
     ${
@@ -346,21 +398,266 @@ function trendChartBodyHTML(state, selection) {
         : `<div class="trend-empty">
             <span>${icon('chart-line', 26)}</span>
             <div>
-              <strong>最近还没有作答记录</strong>
-              <p>按作答次数统计从本次更新后开始记录；完整结束一组练习后，这里会显示最近 30 次提交的正确率变化，中途退出不会计入。</p>
+              <strong>还没有完整练习记录</strong>
+              <p>${
+                subjectTotal
+                  ? '完整做完一组「科目总题库」练习后，这里会显示该科目的总正确率；平时子题库的练习成绩不会计入。'
+                  : '完整做完一组全部题目或未掌握题目后，这里会显示这组练习的整体正确率；中途退出、错题复习、收藏题目、指定题目和无限模式不计入。'
+              }</p>
             </div>
           </div>`
     }
   `;
 }
 
-function learningInsightsHTML(state, monthly, selection) {
+function formatChartDay(date) {
+  const parts = String(date || '').split('-');
+  if (parts.length !== 3) return String(date || '');
+  return `${Number(parts[1])}/${Number(parts[2])}`;
+}
+
+function formatDurationTick(minutes) {
+  const value = Math.max(0, Math.round(minutes));
+  if (value < 60) return `${value}分`;
+  const hours = Math.floor(value / 60);
+  const rest = value % 60;
+  return rest ? `${hours}时${rest}分` : `${hours}时`;
+}
+
+function durationChartSVG(series) {
+  const width = 720;
+  const height = 190;
+  const left = 46;
+  const right = 14;
+  const top = 14;
+  const bottom = 30;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const count = series.length;
+  const rawMax = Math.max(0, ...series.map((item) => item.durationMs / 60000));
+  const step =
+    rawMax <= 10 ? 2 : rawMax <= 30 ? 5 : rawMax <= 60 ? 10 : rawMax <= 120 ? 20 : 30;
+  const maxMinutes = Math.max(step * 2, Math.ceil(rawMax / (step * 2)) * step * 2);
+  const slot = plotWidth / Math.max(1, count);
+  const barWidth = Math.max(4, slot * 0.56);
+
+  const gridLines = [0, 0.5, 1]
+    .map((ratio) => {
+      const value = maxMinutes * ratio;
+      const y = top + (1 - value / maxMinutes) * plotHeight;
+      return `
+        <line class="trend-grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}"></line>
+        <text class="trend-axis-label" x="${left - 9}" y="${y + 3}" text-anchor="end">${formatDurationTick(
+          value,
+        )}</text>
+      `;
+    })
+    .join('');
+
+  const labelIndexes = [0, 7, 14, 21, count - 1].filter(
+    (value, index, list) => value >= 0 && value < count && list.indexOf(value) === index,
+  );
+  const xLabels = labelIndexes
+    .map((index) => {
+      const item = series[index];
+      const x = left + index * slot + slot / 2;
+      const anchor = index === 0 ? 'start' : index === count - 1 ? 'end' : 'middle';
+      return `<text class="trend-axis-label" x="${x}" y="${height - 8}" text-anchor="${anchor}">${formatChartDay(
+        item.date,
+      )}</text>`;
+    })
+    .join('');
+
+  const bars = series
+    .map((item, index) => {
+      const minutes = item.durationMs / 60000;
+      const barHeight =
+        item.durationMs > 0 ? Math.max(2, (minutes / maxMinutes) * plotHeight) : 0;
+      const x = left + index * slot + (slot - barWidth) / 2;
+      const y = top + plotHeight - barHeight;
+      const isToday = index === count - 1;
+      const label = `${formatChartDay(item.date)}，学习 ${formatStudyDuration(
+        item.durationMs,
+      )}，答题 ${item.answered} 道`;
+      return `
+        <rect class="duration-bar ${isToday ? 'is-today' : ''}" x="${x}" y="${y}"
+          width="${barWidth}" height="${barHeight}" rx="3" pointer-events="none"></rect>
+        <rect class="duration-hit" x="${left + index * slot}" y="${top}"
+          width="${slot}" height="${plotHeight}" fill="transparent"
+          data-duration-index="${index}" tabindex="0" role="img"
+          aria-label="${escapeHTML(label)}"><title>${escapeHTML(label)}</title></rect>
+      `;
+    })
+    .join('');
+
+  const seriesData = encodeURIComponent(
+    JSON.stringify(
+      series.map(({ date, durationMs, answered }) => ({ date, durationMs, answered })),
+    ),
+  );
+
+  return `
+    <svg class="trend-chart-svg duration-chart-svg" data-duration-chart-svg
+      viewBox="0 0 ${width} ${height}" data-duration-series="${seriesData}"
+      role="img" aria-label="近 30 天每日学习时长柱状图">
+      <title>近 30 天每日学习时长柱状图</title>
+      ${gridLines}
+      ${xLabels}
+      <line class="trend-grid-line" x1="${left}" y1="${top + plotHeight}"
+        x2="${width - right}" y2="${top + plotHeight}"></line>
+      ${bars}
+    </svg>
+  `;
+}
+
+function durationDataTableHTML(series) {
+  if (!series.length) return '';
+  return `
+    <details class="trend-data-table">
+      <summary>查看每日数据</summary>
+      <div class="trend-table-scroll">
+        <table aria-label="近 30 天每日学习时长">
+          <thead><tr><th>日期</th><th>学习时长</th><th>答题</th></tr></thead>
+          <tbody>
+            ${series
+              .map(
+                (item) => `
+                <tr>
+                  <td>${formatChartDay(item.date)}</td>
+                  <td>${formatStudyDuration(item.durationMs)}</td>
+                  <td>${item.answered}</td>
+                </tr>
+              `,
+              )
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+function durationCardHTML(state, todayDuration) {
+  const series = getDailyStudyDurations(state, 30);
+  const hasData = series.some((item) => item.durationMs > 0);
+  return `
+    <div class="trend-card duration-card">
+      <div class="trend-chart-heading duration-heading">
+        <div>
+          <span class="eyebrow">STUDY TIME · 近 30 天</span>
+          <h3>每日学习时长</h3>
+          <p>只在答题过程中计时；提交答案后阅读解析、打开弹窗或离开练习页都不计入。</p>
+        </div>
+        <div class="trend-kpi duration-kpi">
+          <strong>${formatStudyDuration(todayDuration)}</strong>
+          <span>今天</span>
+        </div>
+      </div>
+      ${
+        hasData
+          ? `<div class="trend-canvas duration-canvas" data-duration-chart>
+              ${durationChartSVG(series)}
+              <div class="trend-tooltip duration-tooltip" data-duration-tooltip hidden role="status">
+                <strong data-duration-tooltip-value></strong>
+                <span data-duration-tooltip-label></span>
+              </div>
+            </div>
+            ${durationDataTableHTML(series)}`
+          : `<div class="trend-empty duration-empty">
+              <span>${icon('clock', 26)}</span>
+              <div>
+                <strong>近 30 天还没有学习时长记录</strong>
+                <p>学习时长只在答题过程中累计；提交后的解析阅读不计入。</p>
+              </div>
+            </div>`
+      }
+    </div>
+  `;
+}
+
+function bindDurationChart(root) {
+  const host = root.querySelector('[data-duration-chart]');
+  if (!host) return;
+  const svg = host.querySelector('[data-duration-chart-svg]');
+  const tooltip = host.querySelector('[data-duration-tooltip]');
+  if (!svg || !tooltip) return;
+
+  let series = [];
+  try {
+    series = JSON.parse(decodeURIComponent(svg.dataset.durationSeries || ''));
+  } catch {
+    series = [];
+  }
+
+  const hide = () => {
+    tooltip.hidden = true;
+    host.querySelectorAll('.duration-hit.is-active').forEach((node) => {
+      node.classList.remove('is-active');
+    });
+  };
+
+  const show = (event) => {
+    const hit = event.target.closest?.('[data-duration-index]');
+    if (!hit) {
+      hide();
+      return;
+    }
+    const item = series[Number(hit.dataset.durationIndex)];
+    if (!item) return;
+    const value = tooltip.querySelector('[data-duration-tooltip-value]');
+    const label = tooltip.querySelector('[data-duration-tooltip-label]');
+    if (value) value.textContent = formatStudyDuration(item.durationMs);
+    if (label) label.textContent = `${formatChartDay(item.date)} · 答题 ${item.answered} 道`;
+    tooltip.hidden = false;
+    host.querySelectorAll('.duration-hit.is-active').forEach((node) => {
+      node.classList.remove('is-active');
+    });
+    hit.classList.add('is-active');
+
+    const hostRect = host.getBoundingClientRect();
+    const hitRect = hit.getBoundingClientRect();
+    if (!hostRect.width || !hitRect.width) return;
+    const center = hitRect.left - hostRect.left + hitRect.width / 2;
+    tooltip.style.left = `${Math.max(64, Math.min(hostRect.width - 64, center))}px`;
+    tooltip.style.top = '5px';
+  };
+
+  host.addEventListener('pointermove', show);
+  host.addEventListener('pointerleave', hide);
+  host.addEventListener('focusin', show);
+  host.addEventListener('focusout', (event) => {
+    if (!host.contains(event.relatedTarget)) hide();
+  });
+}
+
+function accuracyMetricInnerHTML(state, selection) {
+  const summary = trendAccuracySummary(state, selection);
+  const scopeLabel = trendScopeLabel(state, selection);
+  const subjectTotal = Boolean(selection.subjectId && !selection.bankId);
+  return `
+    <span class="insight-metric-icon">${icon('target', 18)}</span>
+    <div>
+      <span>正确率</span>
+      <strong>${summary.accuracy === null ? '—' : `${summary.accuracy}<em>%</em>`}</strong>
+      <small>${escapeHTML(scopeLabel)} · ${
+        summary.sessions
+          ? `累计 ${summary.sessions} 次完整练习`
+          : subjectTotal
+            ? '还没有科目总题库的完整练习'
+            : '还没有完整练习'
+      }</small>
+    </div>
+  `;
+}
+
+function learningInsightsHTML(state, monthly, stats, selection) {
+  const todayDuration = stats.today.durationMs;
   return `
     <section class="panel insights-panel">
       <header class="panel-head insights-head">
         <div>
           <h2>学习统计</h2>
-          <p>学习时长与刷题量按近 30 天统计；正确率折线按最近 30 次作答，仅统计完整结束的练习，一次只显示一个范围。</p>
+          <p>学习时长按今天统计，柱状图展示近 30 天每日时长；刷题量按近 30 天统计，正确率按所选范围的完整练习累计。</p>
         </div>
         <span class="insights-window">${icon('clock', 13)} 近 30 天</span>
       </header>
@@ -368,9 +665,9 @@ function learningInsightsHTML(state, monthly, selection) {
         <article class="insight-metric">
           <span class="insight-metric-icon">${icon('clock', 18)}</span>
           <div>
-            <span>学习时长</span>
-            <strong>${formatStudyDuration(monthly.durationMs)}</strong>
-            <small>近 30 天累计</small>
+            <span>今日学习时长</span>
+            <strong>${formatStudyDuration(todayDuration)}</strong>
+            <small>今天 · 只在答题过程中计时</small>
           </div>
         </article>
         <article class="insight-metric">
@@ -381,20 +678,16 @@ function learningInsightsHTML(state, monthly, selection) {
             <small>近 30 天共 ${monthly.activeDays} 天有练习</small>
           </div>
         </article>
-        <article class="insight-metric">
-          <span class="insight-metric-icon">${icon('target', 18)}</span>
-          <div>
-            <span>正确率</span>
-            <strong>${monthly.accuracy === null ? '—' : `${monthly.accuracy}<em>%</em>`}</strong>
-            <small>近 30 天加权</small>
-          </div>
+        <article class="insight-metric" data-accuracy-metric>
+          ${accuracyMetricInnerHTML(state, selection)}
         </article>
       </div>
       ${
         monthly.durationMs === 0
-          ? '<p class="insights-note">学习时长从本次更新后开始自动累计；刷题数量会包含已有历史。</p>'
+          ? '<p class="insights-note">学习时长只在答题过程中累计；提交后的解析阅读不计入。</p>'
           : ''
       }
+      ${durationCardHTML(state, todayDuration)}
       <div class="trend-card">
         <div class="trend-toolbar" data-trend-toolbar>
           ${trendToolbarHTML(state, selection)}
@@ -594,6 +887,7 @@ export function createDashboardView(app) {
   let rootRef = null;
   let controller = null;
   const trendSelection = { subjectId: '', bankId: '' };
+  let trendPinned = false;
 
   function render(root) {
     controller?.abort();
@@ -605,13 +899,17 @@ export function createDashboardView(app) {
     stats.unmastered = state.questions.filter(
       (question) => isQuestionAnswerable(question) && !isMastered(question),
     ).length;
+    if (!trendPinned) {
+      Object.assign(trendSelection, defaultTrendSelection(state));
+    }
     normalizeTrendSelection(state, trendSelection);
     const monthly = historySummary(state, 30);
+    const latestSession = getLatestCompletedSession(state);
+    const todaySession = getLatestCompletedSession(state, { days: 1 });
 
     const hasQuestions = stats.total > 0;
     const canPractice = stats.answerable > 0;
-    const todayAccuracy =
-      stats.today.answered > 0 ? Math.round((stats.today.correct / stats.today.answered) * 100) : null;
+    const todayAccuracy = todaySession?.accuracy ?? null;
     const goal = 10;
     const todayProgress = Math.min(100, Math.round((stats.today.answered / goal) * 100));
 
@@ -680,7 +978,9 @@ export function createDashboardView(app) {
               <h2>${stats.today.answered ? '手感正在回来' : '今天还没开张'}</h2>
               <p>${
                 stats.today.answered
-                  ? `今日正确率 ${todayAccuracy ?? 0}%，目标 ${goal} 道。`
+                  ? todayAccuracy === null
+                    ? `今天已答 ${stats.today.answered} 道；完成一组完整练习后显示正确率。`
+                    : `最近一组完整练习 ${todayAccuracy}%，今日目标 ${goal} 道。`
                   : hasQuestions
                     ? '做几道题，让今天留下一点进度。'
                     : '导入题目后，这里会记录每天的练习。'
@@ -702,10 +1002,19 @@ export function createDashboardView(app) {
               <section class="stat-grid">
                 ${statCard('题库总量', stats.total, '道', `${stats.answerable} 道可进入练习`, 'book', 'green')}
                 ${statCard('已掌握', stats.mastered, '道', '连续答对 2 次即掌握', 'target', 'blue')}
-                ${statCard('总正确率', stats.accuracy === null ? '—' : stats.accuracy, stats.accuracy === null ? '' : '%', `累计练习 ${stats.attempts} 次`, 'sparkles', 'amber')}
+                ${statCard(
+                  '最近完整练习',
+                  latestSession ? latestSession.accuracy : '—',
+                  latestSession ? '%' : '',
+                  latestSession
+                    ? `${latestSession.correct}/${latestSession.answered} 题 · ${escapeHTML(completedSessionLabel(state, latestSession))}`
+                    : '完整做完一组练习后显示',
+                  'sparkles',
+                  'amber',
+                )}
                 ${statCard('待复习', stats.wrong, '道', stats.wrong ? '上次答错的题目' : '暂时没有错题', 'refresh', 'coral')}
               </section>
-              ${learningInsightsHTML(state, monthly, trendSelection)}
+              ${learningInsightsHTML(state, monthly, stats, trendSelection)}
               <section class="dashboard-bottom">
                 ${quickPracticeHTML(stats)}
                 ${recentQuestionsHTML(state)}
@@ -755,11 +1064,13 @@ export function createDashboardView(app) {
       'change',
       (event) => {
         if (event.target.matches('[data-role="trend-subject"]')) {
+          trendPinned = true;
           trendSelection.subjectId = event.target.value;
           trendSelection.bankId = '';
           normalizeTrendSelection(app.state, trendSelection);
           updateTrendPanel();
         } else if (event.target.matches('[data-role="trend-bank"]')) {
+          trendPinned = true;
           trendSelection.bankId = event.target.value;
           normalizeTrendSelection(app.state, trendSelection);
           updateTrendPanel();
@@ -769,6 +1080,7 @@ export function createDashboardView(app) {
     );
 
     bindTrendChart(root);
+    bindDurationChart(root);
   }
 
   function updateTrendPanel() {
@@ -784,6 +1096,8 @@ export function createDashboardView(app) {
     }
     const chartHost = rootRef.querySelector('[data-trend-chart]');
     if (chartHost) chartHost.innerHTML = trendChartBodyHTML(app.state, trendSelection);
+    const metricHost = rootRef.querySelector('[data-accuracy-metric]');
+    if (metricHost) metricHost.innerHTML = accuracyMetricInnerHTML(app.state, trendSelection);
   }
 
   function bindTrendChart(root) {
@@ -838,9 +1152,9 @@ export function createDashboardView(app) {
       const label = tooltip.querySelector('[data-trend-tooltip-label]');
       if (value) value.textContent = `${point.accuracy}%`;
       if (label) {
-        label.textContent = `第 ${point.attemptNumber} 次 · 本次${
-          point.attemptCorrect ? '答对' : '答错'
-        } · 累计 ${point.correct}/${point.answered}`;
+        label.textContent = `第 ${point.sessionNumber} 次 · ${point.correct}/${point.answered} 题正确 · ${
+          SESSION_SCOPE_LABELS[point.scope] || '完整练习'
+        }`;
       }
       tooltip.hidden = false;
 

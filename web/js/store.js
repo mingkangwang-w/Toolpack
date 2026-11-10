@@ -593,151 +593,243 @@ export function repairQuestionPlacements(state) {
 
 const MAX_HISTORY_DURATION_MS = 24 * 60 * 60 * 1000;
 const MAX_ATTEMPT_DURATION_MS = 6 * 60 * 60 * 1000;
-const RECENT_ATTEMPT_LIMIT = 30;
+const RECENT_SESSION_LIMIT = 500;
+// 只有完整做完的「全部题目」或「未掌握」练习进入正确率记录。
+const ACCURACY_SCOPES = ['all', 'unmastered'];
 
-function emptyRecentAttempts() {
-  return { all: [], bySubject: {}, byBank: {} };
-}
-
-function normalizeRecentAttempt(raw) {
+/**
+ * 一条记录代表一次完整做完的练习，而不是一道题。
+ * 正确率只按这种整组记录计算，避免把收藏、错题复习和半途退出混在一起。
+ */
+function normalizeCompletedSession(raw) {
   if (!raw || typeof raw !== 'object') return null;
+  if (!ACCURACY_SCOPES.includes(raw.scope)) return null;
   const at = typeof raw.at === 'string' ? raw.at : '';
   if (!at || !Number.isFinite(Date.parse(at))) return null;
+  const answered = Math.max(0, Number.parseInt(raw.answered, 10) || 0);
+  const total = Math.max(0, Number.parseInt(raw.total, 10) || answered);
+  // 未答完的练习不是完整测试，不能进入正确率记录。
+  if (!answered || total !== answered) return null;
+  const correct = Math.min(answered, Math.max(0, Number.parseInt(raw.correct, 10) || 0));
   return {
     at,
-    correct: Boolean(raw.correct),
-    questionId: cleanString(raw.questionId).slice(0, 200),
+    scope: raw.scope,
+    subjectId: cleanString(raw.subjectId).slice(0, 200),
+    bankId: cleanString(raw.bankId).slice(0, 200),
+    label: cleanString(raw.label).slice(0, 300),
+    total,
+    answered,
+    correct,
+    accuracy: Math.round((correct / answered) * 100),
   };
 }
 
-function normalizeRecentAttemptList(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map(normalizeRecentAttempt)
-    .filter(Boolean)
-    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-    .slice(-RECENT_ATTEMPT_LIMIT);
+function completedSessionKey(session) {
+  return [
+    session.at,
+    session.scope,
+    session.subjectId,
+    session.bankId,
+    session.total,
+    session.correct,
+  ].join('|');
 }
 
-function normalizeRecentAttemptMap(raw) {
+function normalizeRecentSessions(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const sessions = [];
+  for (const item of raw) {
+    const session = normalizeCompletedSession(item);
+    if (!session) continue;
+    const key = completedSessionKey(session);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    sessions.push(session);
+  }
+  sessions.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return sessions.slice(-RECENT_SESSION_LIMIT);
+}
+
+/**
+ * 记录一次完整练习。调用方必须保证本次练习已全部作答，
+ * 且不属于错题复习、收藏练习、指定题目或无限模式。
+ */
+export function recordCompletedSession(state, entry) {
+  const session = normalizeCompletedSession(entry);
+  if (!session) return null;
+  state.recentSessions = normalizeRecentSessions([...(state.recentSessions || []), session]);
+  return session;
+}
+
+function sessionsForScope(state, { subjectId = '', bankId = '', days = 0 } = {}) {
+  let sessions = normalizeRecentSessions(state?.recentSessions);
+  if (bankId) {
+    sessions = sessions.filter((session) => session.bankId === bankId);
+  } else if (subjectId) {
+    // 科目总题库只汇总该科目总题库的完整练习，不能混入子题库成绩。
+    sessions = sessions.filter(
+      (session) => session.subjectId === subjectId && !session.bankId,
+    );
+  }
+  if (days > 0) {
+    const dateKeys = new Set(recentDateKeys(days));
+    sessions = sessions.filter((session) => dateKeys.has(localDateKey(new Date(session.at))));
+  }
+  return sessions;
+}
+
+/**
+ * 子题库只汇总该子题库；科目只汇总该科目总题库（bankId 为空）的完整练习。
+ * 不传范围时才汇总全部科目的全部完整练习。
+ */
+export function getCompletedAccuracySummary(
+  state,
+  { subjectId = '', bankId = '', days = 0 } = {},
+) {
+  const sessions = sessionsForScope(state, { subjectId, bankId, days });
+  const answered = sessions.reduce((sum, session) => sum + session.answered, 0);
+  const correct = sessions.reduce((sum, session) => sum + session.correct, 0);
+  return {
+    sessions: sessions.length,
+    answered,
+    correct,
+    accuracy: answered ? Math.round((correct / answered) * 100) : null,
+    latestAt: sessions[sessions.length - 1]?.at || null,
+  };
+}
+
+export function getLatestCompletedSession(
+  state,
+  { subjectId = '', bankId = '', days = 0 } = {},
+) {
+  const sessions = sessionsForScope(state, { subjectId, bankId, days });
+  return sessions[sessions.length - 1] || null;
+}
+
+/**
+ * 每次完整练习一个点，点值就是这组练习本身的正确率，不做跨次累计。
+ */
+export function getSessionAccuracySeries(
+  state,
+  { subjectId = '', bankId = '', limit = 30 } = {},
+) {
+  const sessions = sessionsForScope(state, { subjectId, bankId });
+  const count = Math.min(RECENT_SESSION_LIMIT, Math.max(1, Number.parseInt(limit, 10) || 30));
+  const selected = sessions.slice(-count);
+  const offset = sessions.length - selected.length;
+  return selected.map((session, index) => ({
+    index,
+    sessionNumber: offset + index + 1,
+    ...session,
+  }));
+}
+
+function remapRecentSessions(raw, maps) {
+  return normalizeRecentSessions(raw).map((session) => {
+    const subjectId = session.subjectId
+      ? maps?.subjectIdMap?.get(session.subjectId) || session.subjectId
+      : '';
+    const bankId = session.bankId ? maps?.bankIdMap?.get(session.bankId) || session.bankId : '';
+    return { ...session, subjectId, bankId };
+  });
+}
+
+function mergeRecentSessions(target, source) {
+  return normalizeRecentSessions([...(target || []), ...(source || [])]);
+}
+
+function normalizeKnowledgeMapRecord(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const seen = new Set();
+  const nodes = [];
+  for (const rawNode of Array.isArray(raw.nodes) ? raw.nodes : []) {
+    if (!rawNode || typeof rawNode !== 'object') continue;
+    const id = cleanString(rawNode.id).slice(0, 100);
+    if (!id || id === 'root' || id === 'unclassified' || seen.has(id)) continue;
+    seen.add(id);
+    const questionIds = [
+      ...new Set(
+        (Array.isArray(rawNode.questionIds) ? rawNode.questionIds : [])
+          .map((value) => cleanString(value).slice(0, 200))
+          .filter(Boolean),
+      ),
+    ].slice(0, 2000);
+    const keywords = [
+      ...new Set(
+        (Array.isArray(rawNode.keywords) ? rawNode.keywords : [])
+          .map((value) => cleanString(value).slice(0, 80))
+          .filter(Boolean),
+      ),
+    ].slice(0, 20);
+    const relations = (Array.isArray(rawNode.relations) ? rawNode.relations : [])
+      .map((relation) => ({
+        to: cleanString(relation?.to).slice(0, 100),
+        label: cleanString(relation?.label || '相关').slice(0, 80),
+      }))
+      .filter((relation) => relation.to)
+      .slice(0, 24);
+    nodes.push({
+      id,
+      parentId: cleanString(rawNode.parentId || 'root').slice(0, 100) || 'root',
+      label: cleanString(rawNode.label || '未命名知识点').slice(0, 200),
+      summary: cleanString(rawNode.summary).slice(0, 2000),
+      keywords,
+      questionIds,
+      relations,
+    });
+  }
+  if (!nodes.length) return null;
+  return {
+    bankId: cleanString(raw.bankId).slice(0, 200),
+    subjectId: cleanString(raw.subjectId).slice(0, 200),
+    subjectName: cleanString(raw.subjectName).slice(0, 200),
+    bankName: cleanString(raw.bankName).slice(0, 200),
+    generatedAt: typeof raw.generatedAt === 'string' ? raw.generatedAt : '',
+    importedAt: typeof raw.importedAt === 'string' ? raw.importedAt : '',
+    model: cleanString(raw.model).slice(0, 120),
+    fingerprint: cleanString(raw.fingerprint).slice(0, 40),
+    questionCount: Math.max(0, Number.parseInt(raw.questionCount, 10) || 0),
+    unmappedCount: Math.max(0, Number.parseInt(raw.unmappedCount, 10) || 0),
+    sourceBankId: cleanString(raw.sourceBankId).slice(0, 200),
+    summary: cleanString(raw.summary).slice(0, 4000),
+    nodes: nodes.slice(0, 1000),
+  };
+}
+
+function normalizeKnowledgeMaps(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const result = {};
-  for (const [key, list] of Object.entries(raw)) {
-    const id = String(key || '').trim().slice(0, 200);
-    const attempts = normalizeRecentAttemptList(list);
-    if (id && attempts.length) result[id] = attempts;
+  for (const [key, value] of Object.entries(raw)) {
+    const bankId = cleanString(key).slice(0, 200);
+    if (!bankId) continue;
+    const map = normalizeKnowledgeMapRecord(value);
+    if (map) result[bankId] = { ...map, bankId };
   }
   return result;
 }
 
-function normalizeRecentAttempts(raw) {
-  const source = raw && typeof raw === 'object' ? raw : {};
-  return {
-    all: normalizeRecentAttemptList(source.all),
-    bySubject: normalizeRecentAttemptMap(source.bySubject),
-    byBank: normalizeRecentAttemptMap(source.byBank),
-  };
+export function getLocalKnowledgeMap(state, bankId) {
+  if (!bankId) return null;
+  const map = state?.knowledgeMaps?.[bankId];
+  return map && Array.isArray(map.nodes) ? map : null;
 }
 
-function appendRecentAttempt(list, attempt) {
-  list.push(attempt);
-  if (list.length > RECENT_ATTEMPT_LIMIT) {
-    list.splice(0, list.length - RECENT_ATTEMPT_LIMIT);
-  }
+export function saveLocalKnowledgeMap(state, bankId, map) {
+  if (!bankId) return null;
+  const record = normalizeKnowledgeMapRecord(map);
+  if (!record) return null;
+  state.knowledgeMaps = normalizeKnowledgeMaps({
+    ...(state.knowledgeMaps || {}),
+    [bankId]: { ...record, bankId },
+  });
+  return state.knowledgeMaps[bankId] || null;
 }
 
-function recentAttemptEntry(question, correct, subjectId, at) {
-  return {
-    at,
-    correct: Boolean(correct),
-    questionId: cleanString(question?.id).slice(0, 200),
-    subjectId: cleanString(subjectId).slice(0, 200),
-    bankId: cleanString(question?.bankId).slice(0, 200),
-  };
-}
-
-function appendRecentAttemptEntry(recent, entry) {
-  const attempt = {
-    at: entry.at,
-    correct: Boolean(entry.correct),
-    questionId: cleanString(entry.questionId).slice(0, 200),
-  };
-  appendRecentAttempt(recent.all, { ...attempt });
-  if (entry.subjectId) {
-    if (!recent.bySubject[entry.subjectId]) recent.bySubject[entry.subjectId] = [];
-    appendRecentAttempt(recent.bySubject[entry.subjectId], { ...attempt });
-  }
-  if (entry.bankId) {
-    if (!recent.byBank[entry.bankId]) recent.byBank[entry.bankId] = [];
-    appendRecentAttempt(recent.byBank[entry.bankId], { ...attempt });
-  }
-}
-
-function recordRecentAttempt(state, question, correct, subjectId, at) {
-  const recent = normalizeRecentAttempts(state.recentAttempts);
-  state.recentAttempts = recent;
-  appendRecentAttemptEntry(recent, recentAttemptEntry(question, correct, subjectId, at));
-}
-
-/**
- * 把一次完整练习中暂存的作答统一写入正确率折线数据。
- * 中途退出的练习不会调用这个函数，因此不会影响折线图。
- */
-export function recordRecentAttempts(state, entries) {
-  if (!Array.isArray(entries) || !entries.length) return;
-  const recent = normalizeRecentAttempts(state.recentAttempts);
-  state.recentAttempts = recent;
-  for (const entry of entries) {
-    if (!entry || typeof entry !== 'object') continue;
-    appendRecentAttemptEntry(recent, entry);
-  }
-}
-
-function mergeRecentAttemptLists(target, source) {
-  const seen = new Set();
-  const merged = [];
-  for (const attempt of [...target, ...source]) {
-    const key = `${attempt.at}|${attempt.correct ? 1 : 0}|${attempt.questionId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(attempt);
-  }
-  return normalizeRecentAttemptList(merged);
-}
-
-function remapRecentAttempts(raw, maps) {
-  const recent = normalizeRecentAttempts(raw);
-  const remapMap = (source, idMap) => {
-    const result = {};
-    for (const [key, attempts] of Object.entries(source)) {
-      const mapped = idMap?.get(key) || key;
-      result[mapped] = mergeRecentAttemptLists(result[mapped] || [], attempts);
-    }
-    return result;
-  };
-  return {
-    all: recent.all,
-    bySubject: remapMap(recent.bySubject, maps?.subjectIdMap),
-    byBank: remapMap(recent.byBank, maps?.bankIdMap),
-  };
-}
-
-function mergeRecentAttempts(target, source) {
-  const current = normalizeRecentAttempts(target);
-  const incoming = normalizeRecentAttempts(source);
-  const bySubject = { ...current.bySubject };
-  for (const [key, attempts] of Object.entries(incoming.bySubject)) {
-    bySubject[key] = mergeRecentAttemptLists(bySubject[key] || [], attempts);
-  }
-  const byBank = { ...current.byBank };
-  for (const [key, attempts] of Object.entries(incoming.byBank)) {
-    byBank[key] = mergeRecentAttemptLists(byBank[key] || [], attempts);
-  }
-  return {
-    all: mergeRecentAttemptLists(current.all, incoming.all),
-    bySubject,
-    byBank,
-  };
+export function removeLocalKnowledgeMap(state, bankId) {
+  if (!state?.knowledgeMaps || !bankId || !state.knowledgeMaps[bankId]) return false;
+  delete state.knowledgeMaps[bankId];
+  return true;
 }
 
 function normalizeHistoryScopeBucket(raw) {
@@ -891,29 +983,22 @@ export function historySummary(state, days = 30) {
   };
 }
 
-export function getRecentAccuracySeries(
-  state,
-  { subjectId = '', bankId = '', limit = RECENT_ATTEMPT_LIMIT } = {},
-) {
-  const recent = normalizeRecentAttempts(state?.recentAttempts);
-  const source = bankId
-    ? recent.byBank[bankId] || []
-    : subjectId
-      ? recent.bySubject[subjectId] || []
-      : recent.all;
-  const attempts = source.slice(-Math.min(RECENT_ATTEMPT_LIMIT, Math.max(1, limit)));
-  let correctTotal = 0;
-  return attempts.map((attempt, index) => {
-    if (attempt.correct) correctTotal += 1;
-    const answered = index + 1;
+/** 近 N 天每天的学习时长，包含没有练习的 0 值日期。 */
+export function getDailyStudyDurations(state, days = 30) {
+  const dateKeys = recentDateKeys(days);
+  const byDate = new Map();
+  for (const entry of state.history || []) {
+    if (entry && typeof entry.date === 'string') byDate.set(entry.date, entry);
+  }
+  return dateKeys.map((date) => {
+    const entry = byDate.get(date);
     return {
-      index,
-      attemptNumber: answered,
-      at: attempt.at,
-      attemptCorrect: attempt.correct,
-      answered,
-      correct: correctTotal,
-      accuracy: Math.round((correctTotal / answered) * 100),
+      date,
+      durationMs: Math.min(
+        MAX_HISTORY_DURATION_MS,
+        Math.max(0, Math.round(Number(entry?.durationMs) || 0)),
+      ),
+      answered: Math.max(0, Number.parseInt(entry?.answered, 10) || 0),
     };
   });
 }
@@ -925,7 +1010,8 @@ export function defaultState() {
     banks: [],
     questions: [],
     history: [],
-    recentAttempts: emptyRecentAttempts(),
+    recentSessions: [],
+    knowledgeMaps: {},
     duplicateIgnores: [],
     settings: {
       theme: null,
@@ -971,7 +1057,8 @@ export function loadState() {
             .map((entry) => normalizeHistoryEntry(entry))
             .slice(-400)
         : [],
-      recentAttempts: normalizeRecentAttempts(parsed.recentAttempts),
+      recentSessions: normalizeRecentSessions(parsed.recentSessions),
+      knowledgeMaps: normalizeKnowledgeMaps(parsed.knowledgeMaps),
       duplicateIgnores: normalizeDuplicateIgnores(parsed.duplicateIgnores),
       settings: {
         theme: ['light', 'dark'].includes(parsed?.settings?.theme) ? parsed.settings.theme : null,
@@ -1055,10 +1142,19 @@ export function getStats(state) {
   const accuracy = attempts > 0 ? Math.round((correct / attempts) * 100) : null;
 
   const todayKey = localDateKey();
-  const today = state.history.find((entry) => entry.date === todayKey) || {
+  const todayEntry = state.history.find((entry) => entry.date === todayKey);
+  const todayAnswered = Math.max(0, Number.parseInt(todayEntry?.answered, 10) || 0);
+  const today = {
     date: todayKey,
-    answered: 0,
-    correct: 0,
+    answered: todayAnswered,
+    correct: Math.min(
+      todayAnswered,
+      Math.max(0, Number.parseInt(todayEntry?.correct, 10) || 0),
+    ),
+    durationMs: Math.min(
+      MAX_HISTORY_DURATION_MS,
+      Math.max(0, Math.round(Number(todayEntry?.durationMs) || 0)),
+    ),
   };
 
   const activeDays = new Set(state.history.filter((entry) => entry.answered > 0).map((entry) => entry.date));
@@ -1090,14 +1186,9 @@ export function getStats(state) {
   };
 }
 
-export function recordAttempt(
-  state,
-  question,
-  correct,
-  { durationMs = 0, recent = true } = {},
-) {
+export function recordAttempt(state, question, correct, { durationMs = 0 } = {}) {
   const target = state.questions.find((item) => item.id === question.id);
-  if (!target) return null;
+  if (!target) return;
 
   target.stats.attempts += 1;
   if (correct) {
@@ -1124,12 +1215,9 @@ export function recordAttempt(
   const subjectId = question.subjectId || bank?.subjectId || '';
   addHistoryScopeResult(entry.bySubject, subjectId, correct);
   addHistoryScopeResult(entry.byBank, question.bankId, correct);
-  const attempt = recentAttemptEntry(question, correct, subjectId, target.stats.lastAt);
-  if (recent) recordRecentAttempt(state, question, correct, subjectId, target.stats.lastAt);
 
   state.history.sort((a, b) => a.date.localeCompare(b.date));
   if (state.history.length > 400) state.history = state.history.slice(-400);
-  return attempt;
 }
 
 export function recordStudyDuration(state, durationMs) {
@@ -1304,7 +1392,8 @@ export function exportBackup(state) {
     banks: state.banks,
     questions: state.questions,
     history: state.history,
-    recentAttempts: state.recentAttempts || emptyRecentAttempts(),
+    recentSessions: state.recentSessions || [],
+    knowledgeMaps: state.knowledgeMaps || {},
     duplicateIgnores: state.duplicateIgnores || [],
   };
 }
@@ -1331,7 +1420,8 @@ export function exportLibraryPackage(state, { bankIds = [] } = {}) {
     banks,
     questions,
     history: [],
-    recentAttempts: emptyRecentAttempts(),
+    recentSessions: [],
+    knowledgeMaps: {},
     duplicateIgnores: [],
   };
 }
@@ -1492,8 +1582,26 @@ export function importBackup(state, payload) {
   }
   state.history.sort((a, b) => a.date.localeCompare(b.date));
   if (state.history.length > 400) state.history = state.history.slice(-400);
-  const incomingRecentAttempts = remapRecentAttempts(payload?.recentAttempts, maps);
-  state.recentAttempts = mergeRecentAttempts(state.recentAttempts, incomingRecentAttempts);
+  const incomingSessions = remapRecentSessions(payload?.recentSessions, maps);
+  state.recentSessions = mergeRecentSessions(state.recentSessions, incomingSessions);
+  const incomingKnowledgeMaps = normalizeKnowledgeMaps(payload?.knowledgeMaps);
+  if (!state.knowledgeMaps || typeof state.knowledgeMaps !== 'object') {
+    state.knowledgeMaps = {};
+  }
+  for (const [sourceBankId, map] of Object.entries(incomingKnowledgeMaps)) {
+    const localBankId = maps.bankIdMap.get(sourceBankId) || sourceBankId;
+    const bank = state.banks.find((item) => item.id === localBankId);
+    if (!bank) continue;
+    const normalized = normalizeKnowledgeMapRecord(map);
+    if (!normalized) continue;
+    state.knowledgeMaps[localBankId] = {
+      ...normalized,
+      bankId: localBankId,
+      subjectId: bank.subjectId,
+      bankName: bank.name,
+    };
+  }
+  state.knowledgeMaps = normalizeKnowledgeMaps(state.knowledgeMaps);
   state.duplicateIgnores = normalizeDuplicateIgnores([
     ...(state.duplicateIgnores || []),
     ...normalizeDuplicateIgnores(payload?.duplicateIgnores),

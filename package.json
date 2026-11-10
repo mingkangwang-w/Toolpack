@@ -26,6 +26,7 @@
     "test:ui:lan-import": "node tests/ui-lan-import.mjs",
     "test:ui:share": "node tests/ui-share.mjs",
     "test:ui:insights": "node tests/ui-insights.mjs",
+    "test:ui:knowledge": "node tests/ui-knowledge.mjs",
     "test:ui:duplicates": "node tests/ui-duplicates.mjs",
     "test:ui:duplicate-ignore": "node tests/ui-duplicate-ignore.mjs",
     "test:ui:infinite": "node tests/ui-infinite.mjs"

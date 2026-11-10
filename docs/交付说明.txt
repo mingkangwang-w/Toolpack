@@ -13,6 +13,7 @@
 
 3. windows/release/刷题助手-含题库-便携版.zip
    Windows 便携版 + 当前「题库保存」题库。
+   包含题库保存/.shuati-knowledge/ 下的知识图谱 JSON；
    注意：其中包含题库内容，分享给他人前请确认。
 
 二、Android

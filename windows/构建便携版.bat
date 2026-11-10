@@ -51,6 +51,7 @@ echo 正在清理旧构建...
 if exist "build" rmdir /s /q "build"
 if exist "windows\release\刷题助手" rmdir /s /q "windows\release\刷题助手"
 if exist "windows\release\刷题助手-便携版.zip" del /q "windows\release\刷题助手-便携版.zip"
+if exist "windows\release\刷题助手-含题库-便携版.zip" del /q "windows\release\刷题助手-含题库-便携版.zip"
 
 echo.
 echo 正在打包便携版，可能需要几分钟...
@@ -71,7 +72,7 @@ if exist "windows\release\刷题助手\ai-config.json" (
 
 echo.
 echo 正在生成压缩包...
-%PYTHON% -c "import pathlib,zipfile; src=pathlib.Path(r'windows\release\刷题助手'); out=pathlib.Path(r'windows\release\刷题助手-便携版.zip'); z=zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED); [z.write(p,p.relative_to(src.parent)) for p in src.rglob('*') if p.is_file()]; z.close()"
+%PYTHON% "tools\package_portable.py" --source "windows\release\刷题助手" --clean "windows\release\刷题助手-便携版.zip" --with-library "windows\release\刷题助手-含题库-便携版.zip" --library "题库保存"
 if errorlevel 1 (
   echo [提示] 压缩包生成失败，但便携版文件夹已经可以使用。
 )
@@ -79,7 +80,8 @@ if errorlevel 1 (
 echo.
 echo 构建完成：
 echo   windows\release\刷题助手\刷题助手.exe
-echo   windows\release\刷题助手-便携版.zip
+echo   windows\release\刷题助手-便携版.zip（不含题库和 AI Key）
+echo   windows\release\刷题助手-含题库-便携版.zip（含题库与知识图谱，分享前请确认）
 echo.
 echo 把整个「刷题助手」文件夹或 zip 发给其他人即可，他们不需要安装 Python。
 pause

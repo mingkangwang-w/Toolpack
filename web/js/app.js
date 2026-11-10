@@ -1,5 +1,7 @@
 import { createDashboardView } from './views/dashboard.js';
 import { createImportView } from './views/import.js';
+import { createKnowledgeView } from './views/knowledge.js';
+import { createMobileKnowledgeView } from './views/mobile-knowledge.js';
 import { createLibraryView } from './views/library.js';
 import { createPracticeView } from './views/practice.js';
 import { QuestionForm } from './question-form.js';
@@ -13,6 +15,7 @@ import {
   createQuestion,
   createSubjectRecord,
   exportBackup,
+  getLatestCompletedSession,
   getStats,
   importBackup,
   loadState,
@@ -51,6 +54,7 @@ const main = document.getElementById('main-content');
 const titleByView = {
   dashboard: '刷题助手 · 图片转题库',
   import: '导入题目 · 刷题助手',
+  knowledge: OFFLINE_MODE ? '知识树 · 刷题助手' : '知识图谱 · 刷题助手',
   library: '我的题库 · 刷题助手',
   practice: '专注练习 · 刷题助手',
 };
@@ -566,6 +570,9 @@ const app = {
     });
     if (!proceed) return false;
     state.subjects = state.subjects.filter((item) => item.id !== subject.id);
+    for (const bank of banks) {
+      if (state.knowledgeMaps) delete state.knowledgeMaps[bank.id];
+    }
     state.banks = state.banks.filter((bank) => bank.subjectId !== subject.id);
     if (!state.banks.some((bank) => bank.id === state.settings.lastBankId)) {
       state.settings.lastBankId = state.banks[0]?.id || '';
@@ -644,6 +651,7 @@ const app = {
     });
     if (!proceed) return false;
     state.banks = state.banks.filter((item) => item.id !== bank.id);
+    if (state.knowledgeMaps) delete state.knowledgeMaps[bank.id];
     if (state.settings.lastBankId === bank.id) {
       state.settings.lastBankId = banksForSubject(state, bank.subjectId)[0]?.id || '';
     }
@@ -835,6 +843,7 @@ const app = {
 views = {
   dashboard: createDashboardView(app),
   import: createImportView(app),
+  knowledge: OFFLINE_MODE ? createMobileKnowledgeView(app) : createKnowledgeView(app),
   library: createLibraryView(app),
   practice: createPracticeView(app),
 };
@@ -842,12 +851,14 @@ views = {
 const VIEW_LABELS = {
   dashboard: '概览',
   import: '导入题目',
+  knowledge: OFFLINE_MODE ? '知识树' : '知识图谱',
   library: '我的题库',
   practice: '练习',
 };
 
 function buildDefaultAssistantConfig() {
   const stats = getStats(state);
+  const latestSession = getLatestCompletedSession(state);
   const actions = [];
   if (stats.answerable > 0) actions.push('assistant_start_random');
   if (stats.wrong > 0) actions.push('assistant_start_wrong');
@@ -869,7 +880,15 @@ function buildDefaultAssistantConfig() {
         missingAnswers: stats.missingAnswers,
         wrong: stats.wrong,
         mastered: stats.mastered,
-        accuracy: stats.accuracy,
+        accuracy: latestSession?.accuracy ?? null,
+        accuracyScope: '最近一次完整练习（不含错题复习、收藏练习和中途退出）',
+        lastCompleteSession: latestSession
+          ? {
+              answered: latestSession.answered,
+              correct: latestSession.correct,
+              scope: latestSession.scope,
+            }
+          : null,
       },
       recentTitles: state.questions
         .slice()
@@ -2110,7 +2129,8 @@ function openDataDialog() {
 
         state.questions = [];
         state.history = [];
-        state.recentAttempts = { all: [], bySubject: {}, byBank: {} };
+        state.recentSessions = [];
+        state.knowledgeMaps = {};
         state.duplicateIgnores = [];
         state.subjects = [];
         state.banks = [];

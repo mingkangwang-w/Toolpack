@@ -277,6 +277,70 @@ export async function interactWithAI({
   }
 }
 
+export async function generateKnowledgeMap({
+  bankId,
+  bankName,
+  subjectName,
+  questions,
+  maxNodes = 24,
+}) {
+  const timeout = timeoutSignal(300_000);
+  try {
+    const response = await fetch('/api/ai/knowledge-map', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bankId, bankName, subjectName, questions, maxNodes }),
+      signal: timeout.signal,
+    });
+    return await readApiResponse(response);
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('AI 生成知识图谱超时，请稍后重试或换一个响应更快的模型。');
+    }
+    if (error instanceof TypeError) {
+      throw new Error('无法连接本地服务，请确认启动窗口仍然打开。');
+    }
+    throw error;
+  } finally {
+    timeout.clear();
+  }
+}
+
+export async function loadKnowledgeMap(bankId) {
+  const timeout = timeoutSignal(15_000);
+  try {
+    const response = await fetch(`/api/knowledge?bankId=${encodeURIComponent(bankId)}`, {
+      signal: timeout.signal,
+    });
+    return await readApiResponse(response);
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('读取知识图谱超时。');
+    if (error instanceof TypeError) throw new Error('无法连接本地服务，请确认启动窗口仍然打开。');
+    throw error;
+  } finally {
+    timeout.clear();
+  }
+}
+
+export async function saveKnowledgeMap(map) {
+  const timeout = timeoutSignal(20_000);
+  try {
+    const response = await fetch('/api/knowledge/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ map }),
+      signal: timeout.signal,
+    });
+    return await readApiResponse(response);
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('保存知识图谱超时。');
+    if (error instanceof TypeError) throw new Error('无法连接本地服务，请确认启动窗口仍然打开。');
+    throw error;
+  } finally {
+    timeout.clear();
+  }
+}
+
 export async function analyzeTextWithAI({ ocrText, filename, pageNumber, pageCount }) {
   if (!String(ocrText || '').trim()) throw new Error('这张图片没有可分析的 OCR 文字。');
   const timeout = timeoutSignal(300_000);

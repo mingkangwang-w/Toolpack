@@ -10,7 +10,7 @@ import {
   isWrittenAnswerType,
   QUESTION_TYPES,
   recordAttempt,
-  recordRecentAttempts,
+  recordCompletedSession,
   recordStudyDuration,
   scopeCount,
   shuffleQuestionOptions,
@@ -626,6 +626,9 @@ export function createPracticeView(app) {
     let label = '';
     let infinitePool = [];
     let infiniteMode = false;
+    let sessionScope = 'custom';
+    let targetSubjectId = '';
+    let targetBankId = '';
     if (options.feedbackMode) {
       setup.feedbackMode = normalizeFeedbackMode(options.feedbackMode);
     }
@@ -657,6 +660,9 @@ export function createPracticeView(app) {
       infiniteMode =
         setup.infinite === true &&
         !Object.prototype.hasOwnProperty.call(options, 'count');
+      sessionScope = setup.scope;
+      targetSubjectId = setup.subjectId;
+      targetBankId = setup.bankId;
       const meta = SCOPE_META[setup.scope] || SCOPE_META.all;
       if (infiniteMode) {
         setup.shuffle = true;
@@ -706,15 +712,22 @@ export function createPracticeView(app) {
       result: null,
       given: '',
       records: [],
-      recentAttempts: [],
+      scope: sessionScope,
+      targetSubjectId,
+      targetBankId,
+      accuracyEligible:
+        !infiniteMode && (sessionScope === 'all' || sessionScope === 'unmastered'),
+      accuracyCommitted: false,
       outcomes: Array(questions.length).fill(null),
       answers: Array(questions.length).fill(null),
       skipped: 0,
       startedAt: Date.now(),
       finishedAt: null,
-      lastTickAt: Date.now(),
+      answering: true,
+      lastTickAt: null,
       lastActivityAt: Date.now(),
       pendingDurationMs: 0,
+      activeDurationMs: 0,
       shuffleOptions: shuffleOptionsForSession,
       label,
       feedbackMode: setup.feedbackMode,
@@ -724,9 +737,9 @@ export function createPracticeView(app) {
       infiniteQueue: infinitePool.slice(1),
     };
     screen = 'session';
-    resumeStudyClock();
     ensurePracticeAI();
     renderCurrent();
+    resumeStudyClock();
     window.scrollTo({ top: 0, behavior: 'auto' });
   }
 
@@ -740,6 +753,7 @@ export function createPracticeView(app) {
     return (
       screen === 'session' &&
       Boolean(session) &&
+      session.answering === true &&
       document.visibilityState === 'visible' &&
       !document.querySelector('dialog[open]')
     );
@@ -774,6 +788,7 @@ export function createPracticeView(app) {
     session.lastTickAt = null;
     clearStudyIdleTimer();
     if (duration >= 1000) {
+      session.activeDurationMs = (session.activeDurationMs || 0) + duration;
       recordStudyDuration(app.state, duration);
       app.persist();
     }
@@ -790,6 +805,7 @@ export function createPracticeView(app) {
   function stopStudyClock() {
     clearStudyIdleTimer();
     if (session) {
+      session.answering = false;
       session.pendingDurationMs = 0;
       session.lastTickAt = null;
     }
@@ -807,25 +823,44 @@ export function createPracticeView(app) {
     scheduleStudyIdle();
   }
 
-  function consumeStudyDuration() {
+  function consumeStudyDuration({ stop = false } = {}) {
     if (!session) return 0;
     const now = Date.now();
     const active = session.lastTickAt ? Math.max(0, now - session.lastTickAt) : 0;
     const duration = (session.pendingDurationMs || 0) + active;
     session.pendingDurationMs = 0;
     session.lastActivityAt = now;
-    session.lastTickAt = isStudyClockAllowed() ? now : null;
-    if (session.lastTickAt) scheduleStudyIdle();
-    else clearStudyIdleTimer();
+    if (stop) {
+      session.lastTickAt = null;
+      clearStudyIdleTimer();
+    } else {
+      session.lastTickAt = isStudyClockAllowed() ? now : null;
+      if (session.lastTickAt) scheduleStudyIdle();
+      else clearStudyIdleTimer();
+    }
     return duration;
+  }
+
+  /** 结束当前题目的作答计时，返回本次作答题目的有效时长。 */
+  function stopAnswerClock() {
+    if (!session) return 0;
+    session.answering = false;
+    return consumeStudyDuration({ stop: true });
+  }
+
+  function recordActiveStudyDuration(durationMs) {
+    if (durationMs < 1000) return;
+    if (session) {
+      session.activeDurationMs = (session.activeDurationMs || 0) + durationMs;
+    }
+    recordStudyDuration(app.state, durationMs);
+    app.persist();
   }
 
   function flushStudyDuration() {
     if (!session) return;
-    const duration = consumeStudyDuration();
-    if (duration < 1000) return;
-    recordStudyDuration(app.state, duration);
-    app.persist();
+    session.answering = false;
+    recordActiveStudyDuration(consumeStudyDuration({ stop: true }));
   }
 
   function saveCurrentAnswerState() {
@@ -852,17 +887,57 @@ export function createPracticeView(app) {
   function goToQuestion(index, { scroll = 'smooth' } = {}) {
     if (!session || index < 0 || index >= session.total) return;
     saveCurrentAnswerState();
+    const wasAnswering = Boolean(session.answering && session.lastTickAt);
     session.index = index;
     restoreAnswerState(index);
+    if (session.submitted) {
+      // 回到已提交的题目时只显示解析，不计学习时长。
+      session.answering = false;
+      if (wasAnswering) {
+        recordActiveStudyDuration(stopAnswerClock());
+      } else {
+        clearStudyIdleTimer();
+        session.lastTickAt = null;
+      }
+    } else {
+      // 只有停在未提交的题目上才继续计时。
+      session.answering = true;
+      resumeStudyClock();
+    }
     renderCurrent();
     window.scrollTo({ top: 0, behavior: scroll });
   }
 
-  function commitSessionRecentAttempts() {
-    if (!session?.recentAttempts?.length) return;
-    recordRecentAttempts(app.state, session.recentAttempts);
-    session.recentAttempts = [];
+  /**
+   * 只有整组题目全部作答、且不是错题复习/收藏练习/指定题目/无限模式时，
+   * 才把这一组练习作为一个整体写入正确率记录。暂存数据不会逐题进入统计。
+   */
+  function commitCompletedSessionAccuracy() {
+    if (
+      !session ||
+      !session.accuracyEligible ||
+      session.accuracyCommitted ||
+      session.infinite ||
+      !session.total ||
+      session.records.length < session.total
+    ) {
+      return false;
+    }
+    const correct = session.records.filter((record) => record.correct).length;
+    const recorded = recordCompletedSession(app.state, {
+      at: new Date().toISOString(),
+      scope: session.scope,
+      subjectId: session.targetSubjectId,
+      bankId: session.targetBankId,
+      label: session.label,
+      total: session.total,
+      answered: session.records.length,
+      correct,
+    });
+    if (!recorded) return false;
+    session.accuracyCommitted = true;
     app.persist();
+    return true;
   }
 
   function finishSession({ manual = false } = {}) {
@@ -870,8 +945,8 @@ export function createPracticeView(app) {
     flushStudyDuration();
     stopStudyClock();
     saveCurrentAnswerState();
-    // 只有完整结束的练习才计入正确率折线；中途退出不会提交这份暂存数据。
-    commitSessionRecentAttempts();
+    // 完整做完才记录；跳过题目或中途退出都不会写入正确率。
+    commitCompletedSessionAccuracy();
     disposePracticeAI();
     session.finishedAt = Date.now();
     session.endedManually = manual;
@@ -975,11 +1050,7 @@ export function createPracticeView(app) {
     const wasSkipped = session.outcomes[session.index] === 'skipped';
     session.outcomes[session.index] = 'skipped';
     if (!wasSkipped) session.skipped += 1;
-    const durationMs = consumeStudyDuration();
-    if (durationMs >= 1000) {
-      recordStudyDuration(app.state, durationMs);
-      app.persist();
-    }
+    recordActiveStudyDuration(stopAnswerClock());
     saveCurrentAnswerState();
     nextQuestion();
   }
@@ -1018,7 +1089,7 @@ export function createPracticeView(app) {
 
     // 简答题没有唯一文本答案：提交后先请用户对照参考答案自评，再计入统计。
     if (question.type === 'short' && !reveal) {
-      session.pendingDurationMs = consumeStudyDuration();
+      session.pendingDurationMs = stopAnswerClock();
       session.given = given;
       session.submitted = true;
       session.result = {
@@ -1034,7 +1105,8 @@ export function createPracticeView(app) {
       return;
     }
 
-    const durationMs = consumeStudyDuration();
+    const durationMs = stopAnswerClock();
+    session.activeDurationMs = (session.activeDurationMs || 0) + durationMs;
     const graded =
       question.type === 'short'
         ? { correct: false, given, expected: question.answer }
@@ -1054,11 +1126,7 @@ export function createPracticeView(app) {
     });
     saveCurrentAnswerState();
 
-    const recentAttempt = recordAttempt(app.state, question, correct, {
-      durationMs,
-      recent: false,
-    });
-    if (recentAttempt) session.recentAttempts.push(recentAttempt);
+    recordAttempt(app.state, question, correct, { durationMs });
     app.persist();
 
     if (session.feedbackMode === 'afterAll') {
@@ -1076,7 +1144,8 @@ export function createPracticeView(app) {
     if (!question || question.type !== 'short') return;
 
     const gradedCorrect = Boolean(correct);
-    const durationMs = consumeStudyDuration();
+    const durationMs = consumeStudyDuration({ stop: true });
+    session.activeDurationMs = (session.activeDurationMs || 0) + durationMs;
     session.result = {
       ...session.result,
       correct: gradedCorrect,
@@ -1094,11 +1163,7 @@ export function createPracticeView(app) {
     });
     saveCurrentAnswerState();
 
-    const recentAttempt = recordAttempt(app.state, question, gradedCorrect, {
-      durationMs,
-      recent: false,
-    });
-    if (recentAttempt) session.recentAttempts.push(recentAttempt);
+    recordAttempt(app.state, question, gradedCorrect, { durationMs });
     app.persist();
 
     if (session.feedbackMode === 'afterAll') {
@@ -1387,7 +1452,7 @@ export function createPracticeView(app) {
   function summaryTemplate() {
     const stats = sessionStats();
     const accuracy = stats.answered ? Math.round((stats.correct / stats.answered) * 100) : 0;
-    const duration = session.finishedAt ? session.finishedAt - session.startedAt : Date.now() - session.startedAt;
+    const duration = Math.max(0, session.activeDurationMs || 0);
     const wrongRecords = session.records.filter((record) => !record.correct);
     const latestQuestions = session.questions;
     const wrongQuestions = [
@@ -1449,7 +1514,7 @@ export function createPracticeView(app) {
               <div class="score-ring" style="--score:${accuracy}">
                 <div><strong>${accuracy}</strong><span>%</span></div>
               </div>
-              <span>本次正确率</span>
+              <span>${session.accuracyCommitted ? '本次正确率' : '仅本组查看 · 不计入统计'}</span>
             </div>
             <div class="summary-metrics">
               <div><strong>${stats.correct}</strong><span>答对</span></div>
@@ -1808,8 +1873,8 @@ export function createPracticeView(app) {
       });
       if (!proceed) return;
     }
-    // 全部题目都已作答时不算中途退出，仍计入正确率折线。
-    if (session.records.length >= session.total) commitSessionRecentAttempts();
+    // 全部题目都已作答时，这一组仍算完整练习。
+    commitCompletedSessionAccuracy();
     flushStudyDuration();
     resetSession();
     renderCurrent();
@@ -2017,11 +2082,17 @@ export function createPracticeView(app) {
       return screen === 'session' && Boolean(session);
     },
     abandonSession() {
-      if (screen === 'session' && session) flushStudyDuration();
+      if (screen === 'session' && session) {
+        commitCompletedSessionAccuracy();
+        flushStudyDuration();
+      }
       resetSession();
     },
     resetOnLeave() {
-      if (screen === 'session' && session) flushStudyDuration();
+      if (screen === 'session' && session) {
+        commitCompletedSessionAccuracy();
+        flushStudyDuration();
+      }
       resetSession();
     },
   };
